@@ -36,6 +36,8 @@ const ACTIVITY_SENSITIVE_FLAGS = new Set([
   "--campaign-id",
   "--expense-code",
   "--expense-notes",
+  "--lat",
+  "--lng",
   "--promo-code",
   "--team-account-id",
   "--team-id"

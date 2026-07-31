@@ -31,7 +31,22 @@ import { hasPurchaseAccess } from "./auth.js";
 import { contractForTool, contracts } from "./response-contract.js";
 
 const idSchema = z.string().min(1).max(128);
-const coordinateSchema = z.number().finite();
+const latitudeSchema = z
+  .number()
+  .finite()
+  .min(-90)
+  .max(90)
+  .describe(
+    "Optional latitude. Provide it with lng to override the default saved DoorDash address; omit both to use that default address."
+  );
+const longitudeSchema = z
+  .number()
+  .finite()
+  .min(-180)
+  .max(180)
+  .describe(
+    "Optional longitude. Provide it with lat to override the default saved DoorDash address; omit both to use that default address."
+  );
 const fulfillmentSchema = z.enum(["delivery", "pickup"]);
 const verticalSchema = z.enum([
   "grocery",
@@ -180,13 +195,13 @@ export function registerDoorDashTools(server, context) {
     {
       title: "Find Nearby DoorDash Stores",
       description:
-        "Discover grocery, retail, convenience, pet, alcohol, or NV stores. Coordinates affect discovery only; delivery still uses the account default address.",
+        "Discover grocery, retail, convenience, pet, alcohol, or NV stores. lat and lng are optional but must be supplied together. When omitted, this tool resolves coordinates from list_addresses using the account-wide default. Explicit coordinates affect discovery only; delivery still uses the account default address.",
       inputSchema: z
         .object({
           vertical: verticalSchema,
           max: z.number().int().min(1).max(100).default(25),
-          lat: coordinateSchema.optional(),
-          lng: coordinateSchema.optional()
+          lat: latitudeSchema.optional(),
+          lng: longitudeSchema.optional()
         })
         .refine(
           (value) =>
@@ -196,7 +211,8 @@ export function registerDoorDashTools(server, context) {
         ),
       annotations: annotations({ readOnly: true })
     },
-    async (input) => context.invoke(findNearbyStoresArgs(input))
+    async (input) =>
+      context.invokeWithDefaultAddressLocation(input, findNearbyStoresArgs)
   );
 
   register(
@@ -253,12 +269,12 @@ export function registerDoorDashTools(server, context) {
     {
       title: "Search DoorDash Restaurants",
       description:
-        "Find nearby restaurants. Resolve and pass explicit coordinates from the desired saved address whenever possible.",
+        "Find nearby restaurants. lat and lng are optional but must be supplied together. When omitted, this tool resolves coordinates from list_addresses using the account-wide default; provide both to search somewhere else.",
       inputSchema: z
         .object({
           query: z.string().min(1).max(500),
-          lat: coordinateSchema.optional(),
-          lng: coordinateSchema.optional(),
+          lat: latitudeSchema.optional(),
+          lng: longitudeSchema.optional(),
           limit: z.number().int().min(1).max(50).default(10)
         })
         .refine(
@@ -269,7 +285,8 @@ export function registerDoorDashTools(server, context) {
         ),
       annotations: annotations({ readOnly: true })
     },
-    async (input) => context.invoke(searchRestaurantsArgs(input))
+    async (input) =>
+      context.invokeWithDefaultAddressLocation(input, searchRestaurantsArgs)
   );
 
   register(
@@ -293,7 +310,7 @@ export function registerDoorDashTools(server, context) {
     {
       title: "Add DoorDash Cart Items",
       description:
-        "Add items to a restaurant or retail cart. Quantities are additive and this is not idempotent. Check same-store carts first; partial failures may still add some items.",
+        "Add items to a restaurant or retail cart. Delivery uses the account-wide default DoorDash address; there is no per-cart address input. Quantities are additive and this is not idempotent. Check same-store carts first; partial failures may still add some items.",
       inputSchema: z
         .object({
           storeId: idSchema,
@@ -401,7 +418,7 @@ export function registerDoorDashTools(server, context) {
     {
       title: "Create DoorDash Checkout Link",
       description:
-        "Create a browser checkout URL without submitting or charging. The URL does not pin the delivery address.",
+        "Create a browser checkout URL without submitting or charging. The URL does not pin an address; DoorDash uses the account-wide default at checkout.",
       inputSchema: z.object({
         cartUuid: idSchema
       }),
@@ -432,7 +449,7 @@ export function registerDoorDashTools(server, context) {
     {
       title: "Preview DoorDash Order",
       description:
-        "Return authoritative items, pricing, total, delivery address, ETA, tip suggestions, credits, and work budgets. Passing fulfillment changes cart mode.",
+        "Return authoritative items, pricing, total, delivery address, ETA, tip suggestions, credits, and work budgets. Delivery uses the account-wide default DoorDash address. Passing fulfillment changes cart mode.",
       inputSchema: z.object({
         cartUuid: idSchema,
         ...previewOptionsSchema
@@ -564,7 +581,7 @@ export function registerDoorDashTools(server, context) {
       {
         title: "Submit DoorDash Order",
         description:
-          "DANGEROUS: re-preview and then place a DoorDash order, charging the confirmed default payment method or work budget. Never retry the same cart.",
+          "DANGEROUS: re-preview and then place a DoorDash order using the account-wide default delivery address and charging the confirmed default payment method or work budget. Never retry the same cart.",
         inputSchema: z.object({
           cartUuid: idSchema,
           expectedTotalBeforeTipCents: z.number().int().min(0),

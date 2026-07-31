@@ -139,7 +139,8 @@ not a stable typed contract.
 - `set_default_address`
 
 Address changes are account-wide. DoorDash CLI has no per-cart address
-override, and checkout URLs do not pin an address.
+override, and checkout URLs do not pin an address. Delivery carts, previews,
+and submissions use the account-wide default address.
 
 ### Discovery and catalogs
 
@@ -151,6 +152,12 @@ override, and checkout URLs do not pin an address.
 - `find_items`
 - `get_item_details`
 - `build_grocery_list`
+
+`search_restaurants` and `find_nearby_stores` accept optional `lat` and `lng`
+coordinates. Supply both to override the discovery location. If both are
+omitted, the MCP wrapper calls `list_addresses` and uses the coordinates of the
+account-wide default address. It returns an error instead of guessing when
+DoorDash has no marked default or the default has no coordinates.
 
 ### Carts
 

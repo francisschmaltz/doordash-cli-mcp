@@ -522,6 +522,10 @@ test("activity redacts sensitive response keys, links, and command flags", () =>
       "submit",
       "--team-id",
       "secret-team",
+      "--lat",
+      "37.831",
+      "--lng",
+      "-122.219",
       "--cart-uuid",
       "cart-1"
     ]),
@@ -529,6 +533,10 @@ test("activity redacts sensitive response keys, links, and command flags", () =>
       "order",
       "submit",
       "--team-id",
+      "[redacted]",
+      "--lat",
+      "[redacted]",
+      "--lng",
       "[redacted]",
       "--cart-uuid",
       "cart-1"

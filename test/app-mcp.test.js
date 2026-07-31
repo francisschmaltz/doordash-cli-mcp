@@ -125,6 +125,218 @@ test("purchase tools appear only for tokens with the checkbox enabled", async ()
   store.close();
 });
 
+test("discovery coordinates are optional and document the default-address fallback", async () => {
+  const store = new SecurityStore({ databasePath: ":memory:" });
+  const token = store.createToken({
+    name: "Open WebUI",
+    allowPurchases: false
+  });
+  const { mcpHandler } = createTestApp({
+    securityStore: store,
+    runCli: async () => {
+      throw new Error("CLI should not run during tools/list.");
+    }
+  });
+
+  const response = await mcpRequest(
+    mcpHandler,
+    authInfo(store, token.token),
+    "tools/list",
+    {}
+  );
+
+  for (const name of ["search_restaurants", "find_nearby_stores"]) {
+    const tool = response.body.result.tools.find((entry) => entry.name === name);
+    assert.ok(tool);
+    assert.equal(tool.inputSchema.required?.includes("lat") ?? false, false);
+    assert.equal(tool.inputSchema.required?.includes("lng") ?? false, false);
+    assert.match(tool.description, /list_addresses/);
+    assert.match(tool.inputSchema.properties.lat.description, /omit both/);
+    assert.match(tool.inputSchema.properties.lng.description, /omit both/);
+  }
+
+  await mcpHandler.close();
+  store.close();
+});
+
+test("discovery tools resolve omitted coordinates from the default address", async () => {
+  const store = new SecurityStore({ databasePath: ":memory:" });
+  const token = store.createToken({
+    name: "Open WebUI",
+    allowPurchases: false
+  });
+  const calls = [];
+  const { mcpHandler } = createTestApp({
+    securityStore: store,
+    runCli: async (args) => {
+      calls.push(args);
+      if (args[0] === "address" && args[1] === "list") {
+        return cliResult({
+          addresses: [
+            {
+              id: "address-old",
+              printable_address: "1 Old St",
+              latitude: 37.7,
+              longitude: -122.1,
+              is_default: false
+            },
+            {
+              id: "address-default",
+              printable_address: "21 Bay Forest Dr",
+              latitude: 37.831,
+              longitude: -122.219,
+              is_default: true
+            }
+          ]
+        });
+      }
+      if (
+        (args[0] === "search" && args[1] === "--query") ||
+        args[0] === "find-nearby-stores"
+      ) {
+        return cliResult({ stores: [] });
+      }
+      throw new Error(`Unexpected CLI call: ${args.join(" ")}`);
+    }
+  });
+
+  const restaurantResponse = await mcpRequest(
+    mcpHandler,
+    authInfo(store, token.token),
+    "tools/call",
+    {
+      name: "search_restaurants",
+      arguments: {
+        query: "pizza",
+        limit: 10
+      }
+    }
+  );
+  const storeResponse = await mcpRequest(
+    mcpHandler,
+    authInfo(store, token.token),
+    "tools/call",
+    {
+      name: "find_nearby_stores",
+      arguments: {
+        vertical: "grocery",
+        max: 25
+      }
+    },
+    2
+  );
+
+  assert.equal(restaurantResponse.body.result.isError, undefined);
+  assert.equal(storeResponse.body.result.isError, undefined);
+  assert.deepEqual(
+    calls.map((args) => args.slice(0, 2)),
+    [
+      ["address", "list"],
+      ["search", "--query"],
+      ["address", "list"],
+      ["find-nearby-stores", "--vertical"]
+    ]
+  );
+  for (const args of [calls[1], calls[3]]) {
+    assert.deepEqual(args.slice(args.indexOf("--lat"), args.indexOf("--lat") + 2), [
+      "--lat",
+      "37.831"
+    ]);
+    assert.deepEqual(args.slice(args.indexOf("--lng"), args.indexOf("--lng") + 2), [
+      "--lng",
+      "-122.219"
+    ]);
+  }
+
+  await mcpHandler.close();
+  store.close();
+});
+
+test("explicit discovery coordinates skip default-address lookup", async () => {
+  const store = new SecurityStore({ databasePath: ":memory:" });
+  const token = store.createToken({
+    name: "Open WebUI",
+    allowPurchases: false
+  });
+  const calls = [];
+  const { mcpHandler } = createTestApp({
+    securityStore: store,
+    runCli: async (args) => {
+      calls.push(args);
+      return cliResult({ stores: [] });
+    }
+  });
+
+  const response = await mcpRequest(
+    mcpHandler,
+    authInfo(store, token.token),
+    "tools/call",
+    {
+      name: "search_restaurants",
+      arguments: {
+        query: "pizza",
+        lat: 37.8,
+        lng: -122.2,
+        limit: 10
+      }
+    }
+  );
+
+  assert.equal(response.body.result.isError, undefined);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0][0], "search");
+
+  await mcpHandler.close();
+  store.close();
+});
+
+test("omitted discovery coordinates fail clearly without a usable default address", async () => {
+  const store = new SecurityStore({ databasePath: ":memory:" });
+  const token = store.createToken({
+    name: "Open WebUI",
+    allowPurchases: false
+  });
+  const calls = [];
+  const { mcpHandler } = createTestApp({
+    securityStore: store,
+    runCli: async (args) => {
+      calls.push(args);
+      return cliResult({
+        addresses: [
+          {
+            id: "address-1",
+            printable_address: "1 Main St",
+            latitude: 37.8,
+            longitude: -122.2
+          }
+        ]
+      });
+    }
+  });
+
+  const response = await mcpRequest(
+    mcpHandler,
+    authInfo(store, token.token),
+    "tools/call",
+    {
+      name: "search_restaurants",
+      arguments: {
+        query: "pizza"
+      }
+    }
+  );
+
+  assert.equal(response.body.result.isError, true);
+  assert.match(
+    response.body.result.structuredContent.error.message,
+    /did not identify a default saved address/
+  );
+  assert.deepEqual(calls, [["address", "list"]]);
+
+  await mcpHandler.close();
+  store.close();
+});
+
 test("generic runner cannot bypass payment gating", async () => {
   const store = new SecurityStore({ databasePath: ":memory:" });
   const token = store.createToken({
@@ -230,6 +442,8 @@ test("typed tools return concise text and normalized structured content", async 
       name: "search_restaurants",
       arguments: {
         query: "pizza",
+        lat: 37.8,
+        lng: -122.2,
         limit: 10
       }
     }
@@ -289,6 +503,8 @@ test("malformed upstream data is a typed MCP error, not an empty result", async 
       name: "search_restaurants",
       arguments: {
         query: "pizza",
+        lat: 37.8,
+        lng: -122.2,
         limit: 10
       }
     }

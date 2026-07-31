@@ -10,6 +10,7 @@ import { ActivityLog } from "./activity-log.js";
 import { createAdminAuth } from "./admin-auth.js";
 import { createTokenVerifier } from "./auth.js";
 import {
+  listAddressesArgs,
   listPaymentMethodsArgs,
   orderStatusArgs,
   previewOrderArgs,
@@ -92,6 +93,31 @@ function quoteTotalCents(preview) {
 
 function quoteAddress(preview) {
   return preview?.quote?.delivery_address?.printable_address || null;
+}
+
+function defaultAddressCoordinates(addressList) {
+  const defaultAddress = addressList?.addresses?.find(
+    (address) => address.is_default === true
+  );
+  if (!defaultAddress) {
+    throw new DoorDashCliError(
+      "DoorDash did not identify a default saved address. Pass lat and lng together, or set a default address first."
+    );
+  }
+
+  if (
+    !Number.isFinite(defaultAddress.latitude) ||
+    !Number.isFinite(defaultAddress.longitude)
+  ) {
+    throw new DoorDashCliError(
+      "The default DoorDash address has no usable coordinates. Pass lat and lng together, or update the default address in DoorDash."
+    );
+  }
+
+  return {
+    lat: defaultAddress.latitude,
+    lng: defaultAddress.longitude
+  };
 }
 
 function statusValue(statusResult) {
@@ -289,6 +315,36 @@ export function createDoorDashApp({
     }
   }
 
+  async function invokeWithDefaultAddressLocation(
+    input,
+    buildArgs,
+    authInfo
+  ) {
+    if (input.lat !== undefined && input.lng !== undefined) {
+      return invoke(buildArgs(input), {}, authInfo);
+    }
+
+    try {
+      const addresses = await executeCli(listAddressesArgs(), {
+        project: (data) => projectWithContract(contracts.addresses, data),
+        activityProject: (data) =>
+          projectWithContract(contracts.addresses, data),
+        activityContract: contracts.addresses
+      });
+      const coordinates = defaultAddressCoordinates(addresses);
+      return invoke(
+        buildArgs({
+          ...input,
+          ...coordinates
+        }),
+        {},
+        authInfo
+      );
+    } catch (error) {
+      return toolError(error, contracts.storeSearch);
+    }
+  }
+
   async function submitOrder(input, authInfo) {
     try {
       assertCurrentPurchaseAccess(securityStore, authInfo);
@@ -475,6 +531,8 @@ export function createDoorDashApp({
       activityLog,
       authInfo,
       invoke: (args, options) => invoke(args, options, authInfo),
+      invokeWithDefaultAddressLocation: (input, buildArgs) =>
+        invokeWithDefaultAddressLocation(input, buildArgs, authInfo),
       submitOrder: (input) => submitOrder(input, authInfo),
       toolResult: (value, contract) =>
         toToolResult(projectWithContract(contract, value))
