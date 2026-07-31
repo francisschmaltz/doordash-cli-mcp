@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <meta name="theme-color" content="#ffffff" />
+    <title>DoorDash CLI MCP Monitor</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <script src="/app.js" type="module"></script>
+  </head>
+  <body>
+    <header class="masthead">
+      <div class="masthead-inner">
+        <div class="product-identity">
+          <strong>DoorDash CLI MCP</strong>
+        </div>
+        <div class="status-group">
+          <span id="server-status" class="status status-neutral">
+            <span class="status-dot" aria-hidden="true"></span>
+            <span class="status-text">Checking</span>
+          </span>
+          <span id="purchase-status" class="status status-neutral">
+            <span class="status-text">Token access unknown</span>
+          </span>
+        </div>
+      </div>
+    </header>
+
+    <main class="shell">
+      <header class="page-heading">
+        <h1>Monitor</h1>
+      </header>
+
+      <section class="summary-strip" aria-label="Server status">
+        <article class="summary-item">
+          <span class="summary-label">Uptime</span>
+          <strong id="uptime">—</strong>
+        </article>
+        <article class="summary-item">
+          <span class="summary-label">Recorded calls</span>
+          <strong id="activity-count">—</strong>
+        </article>
+        <article class="summary-item summary-endpoint">
+          <span class="summary-label">MCP endpoint</span>
+          <code id="mcp-endpoint">http://127.0.0.1:8787/mcp</code>
+        </article>
+        <article class="summary-item">
+          <span class="summary-label">Last refresh</span>
+          <strong id="last-refresh">—</strong>
+        </article>
+      </section>
+
+      <section class="panel security-panel" aria-labelledby="access-title">
+        <div class="section-heading">
+          <h2 id="access-title">Access tokens</h2>
+          <span class="section-note">Bearer token required</span>
+        </div>
+
+        <div class="security-content">
+          <div class="token-create">
+            <div>
+              <strong>Create an MCP bearer token</strong>
+              <p>
+                Create access for any compatible MCP client. Add an optional
+                name to identify it later.
+              </p>
+            </div>
+            <form id="token-form" class="token-form">
+              <label class="token-name">
+                <span class="visually-hidden">Token name, optional</span>
+                <input
+                  id="token-name"
+                  name="name"
+                  type="text"
+                  maxlength="80"
+                  placeholder="Token name (optional)"
+                  autocomplete="off"
+                />
+              </label>
+              <button class="button button-primary" type="submit">Create token</button>
+            </form>
+          </div>
+
+          <div id="token-secret" class="token-secret" hidden>
+            <div>
+              <span class="token-secret-label">Copy this token now</span>
+              <code id="token-secret-value"></code>
+            </div>
+            <div class="token-secret-actions">
+              <button id="copy-token" class="button button-primary" type="button">Copy</button>
+              <button id="dismiss-token" class="button" type="button">Dismiss</button>
+            </div>
+          </div>
+
+          <p id="security-error" class="inline-error" role="alert" hidden></p>
+
+          <div class="token-list-heading">
+            <div>
+              <strong>Active tokens</strong>
+              <span id="token-count">0</span>
+            </div>
+            <span>Purchasing and card details are granted per token.</span>
+          </div>
+          <div id="token-list" class="token-list"></div>
+          <div id="token-empty" class="token-empty">
+            No active tokens. Create one to connect an MCP client.
+          </div>
+        </div>
+      </section>
+
+      <section class="panel activity-panel" aria-labelledby="activity-title">
+        <div class="section-heading">
+          <h2 id="activity-title">Command history</h2>
+          <div class="refresh-controls">
+            <label class="auto-refresh">
+              <input id="auto-refresh" type="checkbox" checked />
+              <span>Live</span>
+            </label>
+            <button id="refresh" class="button" type="button">Refresh</button>
+          </div>
+        </div>
+
+        <div class="filters">
+          <label class="search-field">
+            <span class="visually-hidden">Filter commands</span>
+            <input id="search" type="search" placeholder="Filter commands or output…" />
+          </label>
+          <label class="status-filter">
+            <span class="visually-hidden">Filter by status</span>
+            <select id="status-filter">
+              <option value="all">All statuses</option>
+              <option value="success">Success</option>
+              <option value="error">Errors</option>
+            </select>
+          </label>
+        </div>
+
+        <p
+          id="status-announcement"
+          class="visually-hidden"
+          aria-live="polite"
+          aria-atomic="true"
+        ></p>
+        <div id="activity-list" class="activity-list"></div>
+        <div id="empty-state" class="empty-state" hidden>
+          <strong>No command history</strong>
+          <span>Calls made through MCP will appear here.</span>
+        </div>
+      </section>
+
+      <footer>
+        <span>Tokens persist in SQLite · command history resets on restart</span>
+        <a href="/activity" target="_blank" rel="noreferrer">View raw JSON</a>
+      </footer>
+    </main>
+  </body>
+</html>
