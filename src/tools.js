@@ -604,7 +604,7 @@ export function registerDoorDashTools(server, context) {
     {
       title: "Get DoorDash Item Details",
       description:
-        "Return current pricing and selectable option_id values. IDs prefixed i_, or bare IDs paired with a restaurant menu_id, use restaurant modifiers; other IDs use grocery or retail lookup. Set option_queries to return compact matching paths from a large modifier tree instead of the whole tree.",
+        "Return current pricing and selectable option_id values. IDs prefixed i_ use restaurant modifiers and may omit menu_id; when DoorDash omits menu_id, store_id is used as the accepted restaurant menu context. Bare IDs paired with a restaurant menu_id also use restaurant modifiers; other IDs use grocery or retail lookup. Set option_queries to return compact matching paths from a large modifier tree instead of the whole tree.",
       inputSchema: canonicalObject({
         store_id: idSchema.describe(
           "Copy store_id from the search, menu, or item-search result."
@@ -637,13 +637,14 @@ export function registerDoorDashTools(server, context) {
     {
       title: "Get DoorDash Restaurant Menu",
       description:
-        "Accept a restaurant store_id and return its menu_id and menu items. Set query to the requested dish name to keep the result small. menu_id is an output for item details and cart calls, not an input to this tool.",
+        "Accept a restaurant store_id and return its menu context and menu items. Set query to the requested dish name to keep the result small. If DoorDash's full-menu lookup fails, the server verifies recent order-history items through current item details; an exact query returns matches, while an unfiltered call returns at most five and warns that the result is incomplete. menu_id is an output for item details and cart calls, not an input to this tool.",
       inputSchema: canonicalObject({
         store_id: idSchema.describe(
           "Copy store_id from search_restaurants or get_store_details."
         ),
         query: z
           .string()
+          .trim()
           .min(1)
           .max(300)
           .optional()
@@ -919,10 +920,15 @@ export function registerDoorDashTools(server, context) {
       inputSchema: orderReferenceSchema(),
       annotations: annotations({ readOnly: true })
     },
-    async (input) =>
-      context.invoke(
-        receiptArgs({ orderUuid: orderUuidFromInput(input) })
-      )
+    async (input) => {
+      const orderUuid = orderUuidFromInput(input);
+      return context.invoke(receiptArgs({ orderUuid }), {
+        transform: (data) => ({
+          ...data,
+          mcp_order_uuid: orderUuid
+        })
+      });
+    }
   );
 
   register(

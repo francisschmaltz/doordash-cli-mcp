@@ -422,11 +422,11 @@ function seedNestedSelections(groups, values, state, parentPath = []) {
   }
 }
 
-function requestNameCandidates(groups, state, request) {
-  const occurrences = activeOccurrences(groups, state).filter(({ path }) =>
+function nameCandidatesFromOccurrences(occurrences, state, request) {
+  const availableOccurrences = occurrences.filter(({ path }) =>
     pathIsAvailable(path)
   );
-  const exact = occurrences.filter(({ group, option }) =>
+  const exact = availableOccurrences.filter(({ group, option }) =>
     exactMatchKind(group, option, request.name)
   );
   const hasQualifiedExact = exact.some(
@@ -435,7 +435,7 @@ function requestNameCandidates(groups, state, request) {
   );
   const related = hasQualifiedExact
     ? exact
-    : occurrences.filter(({ group, option }) =>
+    : availableOccurrences.filter(({ group, option }) =>
         relatedNameMatch(group, option, request.name)
       );
   const compatibleExact = exact.filter(({ path }) =>
@@ -450,6 +450,22 @@ function requestNameCandidates(groups, state, request) {
     compatibleExact,
     compatibleRelated
   };
+}
+
+function requestNameCandidates(groups, state, request) {
+  return nameCandidatesFromOccurrences(
+    activeOccurrences(groups, state),
+    state,
+    request
+  );
+}
+
+function globalNameCandidates(state, request) {
+  return nameCandidatesFromOccurrences(
+    state.index.occurrences,
+    state,
+    request
+  );
 }
 
 function resolvableNameRequest(groups, state, request) {
@@ -506,7 +522,65 @@ function qualifiedRecovery(candidates, optionId) {
   return `Retry with the same option_id${optionId ? ` ${optionId}` : ""} and one exact qualified name: ${choices}.`;
 }
 
+function pendingSelectableSources(state, requests) {
+  const sourcesByOccurrence = new Map();
+  const add = (occurrence, source) => {
+    for (const { option } of occurrence.path) {
+      const key = state.index.occurrenceIds.get(option);
+      const sources = sourcesByOccurrence.get(key) || new Set();
+      sources.add(source);
+      sourcesByOccurrence.set(key, sources);
+    }
+  };
+
+  for (const request of requests.filter(
+    (entry) => !entry.resolved && !entry.invalid
+  )) {
+    if (request.option_id) {
+      for (const occurrence of requestIdCandidates(state, request).compatible) {
+        add(occurrence, request.source);
+      }
+      continue;
+    }
+    for (const occurrence of globalNameCandidates(state, request)
+      .compatibleExact) {
+      add(occurrence, request.source);
+    }
+  }
+  return sourcesByOccurrence;
+}
+
+function couldActivateAnotherNameCandidate(
+  groups,
+  state,
+  request,
+  sourcesByOccurrence
+) {
+  const activeGroups = currentActiveGroups(groups, state);
+  const candidates = globalNameCandidates(state, request);
+  const compatible = candidates.compatibleRelated.length
+    ? candidates.compatibleRelated
+    : candidates.compatibleExact;
+
+  for (const occurrence of compatible) {
+    if (activeGroups.has(occurrence.group)) {
+      continue;
+    }
+    const parent = occurrence.path.at(-2);
+    const key = state.index.occurrenceIds.get(parent?.option);
+    const sources = sourcesByOccurrence.get(key);
+    if (
+      sources &&
+      (sources.size > 1 || !sources.has(request.source))
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function resolveOneNameRequest(groups, state, requests) {
+  const sourcesByOccurrence = pendingSelectableSources(state, requests);
   const choices = requests
     .filter(
       (request) =>
@@ -517,6 +591,15 @@ function resolveOneNameRequest(groups, state, requests) {
       occurrence: resolvableNameRequest(groups, state, request)
     }))
     .filter(({ occurrence }) => occurrence)
+    .filter(
+      ({ request }) =>
+        !couldActivateAnotherNameCandidate(
+          groups,
+          state,
+          request,
+          sourcesByOccurrence
+        )
+    )
     .sort(
       (left, right) =>
         left.occurrence.depth - right.occurrence.depth ||

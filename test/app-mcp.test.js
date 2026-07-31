@@ -425,7 +425,7 @@ test("cart tools instruct callers to satisfy required options and return checkou
   assert.match(genericDetailTool.description, /prefixed i_/);
   assert.match(
     genericDetailTool.description,
-    /bare IDs paired with a restaurant menu_id/
+    /bare IDs paired with a restaurant menu_id/i
   );
   assert.match(genericDetailTool.description, /compact matching paths/);
   assert.ok(genericDetailTool.inputSchema.properties.menu_id);

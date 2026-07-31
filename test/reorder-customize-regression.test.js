@@ -84,6 +84,52 @@ function sourceOrder() {
   };
 }
 
+function liveReceiptShape() {
+  return {
+    success: true,
+    store_id: "store-chicken",
+    store_name: "Example Chicken",
+    line_items: [
+      {
+        charge_id: "SUBTOTAL",
+        label: "Subtotal",
+        final_money: { unit_amount: 1299 }
+      },
+      {
+        charge_id: "TOTAL",
+        label: "Total",
+        final_money: { unit_amount: 1299 }
+      }
+    ],
+    orders: [
+      {
+        id: "internal-order-line-group",
+        order_items: [
+          {
+            id: "internal-order-line",
+            quantity: 1,
+            item: {
+              id: "9459662774",
+              name: "Deluxe Chicken Meal",
+              price_monetary_fields: { unit_amount: 1299 }
+            },
+            options: [
+              {
+                id: "31718037616",
+                quantity: 1,
+                item_extra_option: {
+                  id: "31718037616",
+                  name: "Pepper Jack Meal"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  };
+}
+
 function ranchItemDetails() {
   return {
     item: {
@@ -168,7 +214,7 @@ test("reorder hydrates incomplete cart-list entries before mutation", async (t) 
     runCli: async (args) => {
       calls.push(args);
       if (args[0] === "order" && args[1] === "receipt") {
-        return cliResult(sourceOrder());
+        return cliResult(liveReceiptShape());
       }
       if (args[0] === "cart" && args[1] === "list") {
         return cliResult({
@@ -241,7 +287,7 @@ test("reorder refuses a truncated active-cart list", async (t) => {
     runCli: async (args) => {
       calls.push(args);
       if (args[0] === "order" && args[1] === "receipt") {
-        return cliResult(sourceOrder());
+        return cliResult(liveReceiptShape());
       }
       if (args[0] === "cart" && args[1] === "list") {
         return cliResult({ carts: [], truncated: " TRUE " });
@@ -336,7 +382,7 @@ test("reorder mutates once, hydrates the cart, and reports quantity drift", asyn
     runCli: async (args) => {
       calls.push(args);
       if (args[0] === "order" && args[1] === "receipt") {
-        return cliResult(sourceOrder());
+        return cliResult(liveReceiptShape());
       }
       if (args[0] === "cart" && args[1] === "list") {
         return cliResult({ carts: [] });
@@ -363,7 +409,14 @@ test("reorder mutates once, hydrates the cart, and reports quantity drift", asyn
                 item_id: "i_9459662774",
                 menu_id: "menu-chicken",
                 name: "Deluxe Chicken Meal",
-                quantity: 2
+                quantity: 2,
+                selected_options: [
+                  {
+                    option_id: "31718037616",
+                    option_name: "Pepper Jack Meal",
+                    quantity: 1
+                  }
+                ]
               }
             ]
           }
@@ -549,7 +602,7 @@ test("order history hands one safe reorder into one customized cart add", async 
         return cliResult({ orders: [sourceOrder()] });
       }
       if (args[0] === "order" && args[1] === "receipt") {
-        return cliResult(sourceOrder());
+        return cliResult(liveReceiptShape());
       }
       if (args[0] === "cart" && args[1] === "list") {
         return cliResult({ carts: [] });
@@ -757,6 +810,326 @@ test("bare restaurant item ID with menu_id uses restaurant details", async (t) =
       "9459662774"
     ]
   ]);
+});
+
+test("restaurant item details uses store_id when menu_id lookup is empty", async (t) => {
+  const store = new SecurityStore({ databasePath: ":memory:" });
+  const auth = authInfo(store);
+  const calls = [];
+  const { mcpHandler } = createTestApp({
+    securityStore: store,
+    runCli: async (args) => {
+      calls.push(args);
+      if (args[0] === "store-details") {
+        return cliResult({
+          success: true,
+          store: {
+            store_id: "store-chicken",
+            name: "Example Chicken",
+            menu_id: ""
+          }
+        });
+      }
+      if (args[0] === "restaurant-item-details") {
+        const details = ranchItemDetails();
+        details.item.item_id = "i_9459662774";
+        return cliResult(details);
+      }
+      throw new Error(`Unexpected CLI call: ${args.join(" ")}`);
+    }
+  });
+  t.after(async () => {
+    await mcpHandler.close();
+    store.close();
+  });
+
+  const response = await mcpRequest(mcpHandler, auth, {
+    name: "get_item_details",
+    arguments: {
+      store_id: "store-chicken",
+      item_id: "i_9459662774",
+      option_queries: ["Ranch"]
+    }
+  });
+
+  assert.equal(response.result.isError, undefined);
+  assert.equal(response.result.structuredContent.menu_id, "store-chicken");
+  assert.equal(
+    response.result.structuredContent.item.item_id,
+    "i_9459662774"
+  );
+  assert.deepEqual(calls.map((args) => args[0]), [
+    "store-details",
+    "restaurant-item-details"
+  ]);
+  assert.deepEqual(calls[1], [
+    "restaurant-item-details",
+    "--store-id",
+    "store-chicken",
+    "--menu-id",
+    "store-chicken",
+    "--item-id",
+    "9459662774"
+  ]);
+});
+
+test("restaurant item details preserves a menu_id returned by the item endpoint", async (t) => {
+  const store = new SecurityStore({ databasePath: ":memory:" });
+  const auth = authInfo(store);
+  const { mcpHandler } = createTestApp({
+    securityStore: store,
+    runCli: async (args) => {
+      if (args[0] === "store-details") {
+        return cliResult({
+          success: true,
+          store: { store_id: "store-chicken", menu_id: "" }
+        });
+      }
+      if (args[0] === "restaurant-item-details") {
+        const details = ranchItemDetails();
+        details.menu_id = "menu-authoritative";
+        details.item.item_id = "i_9459662774";
+        return cliResult(details);
+      }
+      throw new Error(`Unexpected CLI call: ${args.join(" ")}`);
+    }
+  });
+  t.after(async () => {
+    await mcpHandler.close();
+    store.close();
+  });
+
+  const response = await mcpRequest(mcpHandler, auth, {
+    name: "get_item_details",
+    arguments: {
+      store_id: "store-chicken",
+      item_id: "i_9459662774"
+    }
+  });
+
+  assert.equal(response.result.isError, undefined);
+  assert.equal(
+    response.result.structuredContent.menu_id,
+    "menu-authoritative"
+  );
+  assert.equal(
+    response.result.structuredContent.item.menu_id,
+    "menu-authoritative"
+  );
+});
+
+test("get_menu query recovers a current history item when full menu fails", async (t) => {
+  const store = new SecurityStore({ databasePath: ":memory:" });
+  const auth = authInfo(store);
+  const calls = [];
+  const { mcpHandler } = createTestApp({
+    securityStore: store,
+    runCli: async (args) => {
+      calls.push(args);
+      if (args[0] === "menu") {
+        return cliResult({
+          success: false,
+          menu_id: "",
+          message: "Something went wrong retrieving the menu."
+        });
+      }
+      if (args[0] === "order" && args[1] === "history") {
+        return cliResult({ orders: [sourceOrder()] });
+      }
+      if (args[0] === "restaurant-item-details") {
+        const details = ranchItemDetails();
+        details.menu_id = "menu-chicken";
+        details.item.item_id = "i_9459662774";
+        return cliResult(details);
+      }
+      throw new Error(`Unexpected CLI call: ${args.join(" ")}`);
+    }
+  });
+  t.after(async () => {
+    await mcpHandler.close();
+    store.close();
+  });
+
+  const response = await mcpRequest(mcpHandler, auth, {
+    name: "get_menu",
+    arguments: {
+      store_id: "store-chicken",
+      query: "Deluxe Chicken Meal"
+    }
+  });
+
+  assert.equal(response.result.isError, undefined);
+  assert.equal(response.result.structuredContent.menu_id, "menu-chicken");
+  assert.equal(response.result.structuredContent.items.length, 1);
+  assert.equal(
+    response.result.structuredContent.items[0].item_id,
+    "i_9459662774"
+  );
+  assert.match(
+    response.result.structuredContent.warnings.join(" "),
+    /full-menu lookup failed.*order history/i
+  );
+  assert.deepEqual(calls.map((args) => args.slice(0, 2)), [
+    ["menu", "--store-id"],
+    ["order", "history"],
+    ["restaurant-item-details", "--store-id"]
+  ]);
+
+  calls.length = 0;
+  const unfiltered = await mcpRequest(
+    mcpHandler,
+    auth,
+    {
+      name: "get_menu",
+      arguments: { store_id: "store-chicken" }
+    },
+    2
+  );
+  assert.equal(unfiltered.result.isError, undefined);
+  assert.equal(unfiltered.result.structuredContent.items.length, 1);
+  assert.match(
+    unfiltered.result.structuredContent.warnings.join(" "),
+    /not the store's complete menu/i
+  );
+  assert.deepEqual(calls.map((args) => args.slice(0, 2)), [
+    ["menu", "--store-id"],
+    ["order", "history"],
+    ["restaurant-item-details", "--store-id"]
+  ]);
+});
+
+test("get_menu fallback keeps the newest historical item identity", async (t) => {
+  const store = new SecurityStore({ databasePath: ":memory:" });
+  const auth = authInfo(store);
+  const calls = [];
+  const { mcpHandler } = createTestApp({
+    securityStore: store,
+    runCli: async (args) => {
+      calls.push(args);
+      if (args[0] === "menu") {
+        return cliResult({
+          success: false,
+          menu_id: "",
+          message: "Something went wrong retrieving the menu."
+        });
+      }
+      if (args[0] === "order" && args[1] === "history") {
+        const newest = sourceOrder();
+        const older = sourceOrder();
+        older.order_uuid = "order-older";
+        older.items[0].name = "Retired Deluxe Chicken Meal";
+        return cliResult({
+          orders: [
+            { ...sourceOrder(), order_uuid: "order-empty", items: [] },
+            newest,
+            older
+          ]
+        });
+      }
+      if (args[0] === "restaurant-item-details") {
+        const details = ranchItemDetails();
+        details.item.item_id = "i_9459662774";
+        return cliResult(details);
+      }
+      throw new Error(`Unexpected CLI call: ${args.join(" ")}`);
+    }
+  });
+  t.after(async () => {
+    await mcpHandler.close();
+    store.close();
+  });
+
+  const response = await mcpRequest(mcpHandler, auth, {
+    name: "get_menu",
+    arguments: {
+      store_id: "store-chicken",
+      query: "Deluxe Chicken Meal"
+    }
+  });
+
+  assert.equal(response.result.isError, undefined);
+  assert.deepEqual(
+    response.result.structuredContent.items.map((item) => item.name),
+    ["Deluxe Chicken Meal"]
+  );
+  assert.equal(
+    calls.filter((args) => args[0] === "restaurant-item-details").length,
+    1
+  );
+});
+
+test("get_menu fallback rejects mismatched current item details", async (t) => {
+  const store = new SecurityStore({ databasePath: ":memory:" });
+  const auth = authInfo(store);
+  const { mcpHandler } = createTestApp({
+    securityStore: store,
+    runCli: async (args) => {
+      if (args[0] === "menu") {
+        return cliResult({
+          success: false,
+          menu_id: "",
+          error_reason: "TEMPORARY_UPSTREAM_FAILURE",
+          message: "Full menu unavailable."
+        });
+      }
+      if (args[0] === "order" && args[1] === "history") {
+        return cliResult({ orders: [sourceOrder()] });
+      }
+      if (args[0] === "restaurant-item-details") {
+        const details = ranchItemDetails();
+        details.item.item_id = "i_different_item";
+        return cliResult(details);
+      }
+      throw new Error(`Unexpected CLI call: ${args.join(" ")}`);
+    }
+  });
+  t.after(async () => {
+    await mcpHandler.close();
+    store.close();
+  });
+
+  const response = await mcpRequest(mcpHandler, auth, {
+    name: "get_menu",
+    arguments: {
+      store_id: "store-chicken",
+      query: "Deluxe Chicken Meal"
+    }
+  });
+
+  assert.equal(response.result.isError, true);
+  assert.equal(
+    response.result.structuredContent.error.code,
+    "TEMPORARY_UPSTREAM_FAILURE"
+  );
+  assert.equal(
+    response.result.structuredContent.error.message,
+    "Full menu unavailable."
+  );
+});
+
+test("get_menu rejects a whitespace-only query before the CLI", async (t) => {
+  const store = new SecurityStore({ databasePath: ":memory:" });
+  const auth = authInfo(store);
+  let cliCalls = 0;
+  const { mcpHandler } = createTestApp({
+    securityStore: store,
+    runCli: async () => {
+      cliCalls += 1;
+      throw new Error("The CLI must not run for invalid input.");
+    }
+  });
+  t.after(async () => {
+    await mcpHandler.close();
+    store.close();
+  });
+
+  const response = await mcpRequest(mcpHandler, auth, {
+    name: "get_menu",
+    arguments: { store_id: "store-chicken", query: "   " }
+  });
+
+  assert.equal(response.result.isError, true);
+  assert.equal(cliCalls, 0);
 });
 
 test("bare nested options fall back to restaurant preflight", async (t) => {
@@ -1069,7 +1442,7 @@ test("restaurant fallback is not repeated after a name mismatch", async (t) => {
   ]);
 });
 
-test("get_menu preserves an upstream success:false message", async (t) => {
+test("get_menu preserves success:false when history recovery is unavailable", async (t) => {
   const store = new SecurityStore({ databasePath: ":memory:" });
   const auth = authInfo(store);
   const calls = [];
@@ -1103,7 +1476,7 @@ test("get_menu preserves an upstream success:false message", async (t) => {
   assert.equal(error.code, "TEMPORARY_UPSTREAM_FAILURE");
   assert.equal(error.message, "Please try again.");
   assert.notEqual(error.code, "UPSTREAM_SCHEMA_ERROR");
-  assert.deepEqual(calls.map((args) => args[0]), ["menu"]);
+  assert.deepEqual(calls.map((args) => args[0]), ["menu", "order"]);
 });
 
 test("preview preserves success:false before quote validation", async (t) => {

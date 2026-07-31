@@ -1006,6 +1006,7 @@ function normalizeItem(
   value,
   {
     cartLine = false,
+    orderLine = false,
     includeModifierGroups = true,
     includeSubstitutions = true,
     menuId,
@@ -1020,7 +1021,7 @@ function normalizeItem(
     first(
       source.selected_options,
       source.nested_options,
-      cartLine && !looksLikeModifierGroups(source.options)
+      (cartLine || orderLine) && !looksLikeModifierGroups(source.options)
         ? source.options
         : undefined
     )
@@ -1282,6 +1283,23 @@ function findPricingLine(lines, pattern) {
   )?.amount;
 }
 
+function normalizePricingLineName(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ");
+}
+
+function findExactPricingLine(lines, names) {
+  const normalizedNames = new Set(names.map(normalizePricingLineName));
+  return lines.find((line) =>
+    [line._match, line.label].some((value) =>
+      normalizedNames.has(normalizePricingLineName(value))
+    )
+  )?.amount;
+}
+
 function normalizePricing(value, { tipCents } = {}) {
   const source = asObject(value) || {};
   const lines = pricingLines(
@@ -1317,14 +1335,25 @@ function normalizePricing(value, { tipCents } = {}) {
   const tip =
     tipCents === undefined
       ? money(first(source.tip, source.dasher_tip, source.tip_amount)) ??
-        findPricingLine(lines, /tip/i)
+        findExactPricingLine(lines, [
+          "tip",
+          "dasher tip",
+          "driver tip",
+          "courier tip"
+        ])
       : moneyFromCents(tipCents);
   const totalBeforeTip = money(
     first(source.total_before_tip, source.net_total_before_tip)
   );
   const explicitTotal = money(
     first(source.final_total, source.grand_total, source.total)
-  );
+  ) ??
+    findExactPricingLine(lines, [
+      "total",
+      "grand total",
+      "final total",
+      "order total"
+    ]);
   const total =
     tipCents !== undefined &&
     totalBeforeTip !== undefined &&
@@ -1458,6 +1487,24 @@ function quoteItems(quote, { menuId, orderTarget } = {}) {
   );
 }
 
+function receiptOrderItems(value) {
+  const source = asObject(value);
+  if (!source || !Array.isArray(source.orders)) {
+    return undefined;
+  }
+  assertObjectArray(source.orders, "receipt orders");
+  const itemArrays = source.orders
+    .map((order) => order.order_items)
+    .filter(Array.isArray);
+  if (!itemArrays.length) {
+    return undefined;
+  }
+  for (const items of itemArrays) {
+    assertObjectArray(items, "receipt order items");
+  }
+  return itemArrays.flat();
+}
+
 function normalizeOrder(value, options = {}) {
   const wrapper = asObject(value) || {};
   const source = {
@@ -1493,7 +1540,8 @@ function normalizeOrder(value, options = {}) {
   const sourceItemAliases = [
     source.items,
     source.order_items,
-    source.ordered_items
+    source.ordered_items,
+    receiptOrderItems(source)
   ];
   const nonEmptySourceItems = sourceItemAliases.find(
     (entry) => Array.isArray(entry) && entry.length
@@ -1510,11 +1558,16 @@ function normalizeOrder(value, options = {}) {
       ? options.itemLimit
       : 100;
   const items = Array.isArray(itemsSource)
-    ? itemsSource.slice(0, itemLimit).map((entry) =>
-        entry?.item_id || entry?.cart_item_id
-          ? normalizeItem(entry, { cartLine: true, menuId, orderTarget })
-          : normalizeItem(entry, { menuId, orderTarget })
-      )
+    ? itemsSource.slice(0, itemLimit).map((entry) => {
+        const orderLine = Boolean(asObject(entry?.item));
+        return normalizeItem(entry, {
+          cartLine:
+            !orderLine && Boolean(entry?.item_id || entry?.cart_item_id),
+          orderLine,
+          menuId,
+          orderTarget
+        });
+      })
     : undefined;
   const previewStore =
     nonEmptyObject(options.preview?.store) ||
@@ -2882,10 +2935,12 @@ function receiptProject(data) {
     throw new UpstreamSchemaError("DoorDash returned an invalid receipt.");
   }
   const receiptSource = asObject(source.receipt) || source;
+  const nestedItems = receiptOrderItems(receiptSource);
   if (
     !Array.isArray(receiptSource.items) &&
     !Array.isArray(receiptSource.order_items) &&
-    !Array.isArray(receiptSource.ordered_items)
+    !Array.isArray(receiptSource.ordered_items) &&
+    !Array.isArray(nestedItems)
   ) {
     throw new UpstreamSchemaError(
       "DoorDash receipt did not contain its ordered items."
@@ -2895,11 +2950,14 @@ function receiptProject(data) {
     first(
       receiptSource.items,
       receiptSource.order_items,
-      receiptSource.ordered_items
+      receiptSource.ordered_items,
+      nestedItems
     ),
     "receipt items"
   );
-  const order = normalizeOrder(source);
+  const order = normalizeOrder(source, {
+    orderUuid: idValue(source.mcp_order_uuid)
+  });
   if (!order.pricing) {
     throw new UpstreamSchemaError(
       "DoorDash receipt did not contain pricing."

@@ -20,6 +20,7 @@ import {
   itemDetailsArgs,
   listAddressesArgs,
   listCartsArgs,
+  listOrdersArgs,
   listPaymentMethodsArgs,
   menuArgs,
   orderStatusArgs,
@@ -55,7 +56,7 @@ const PUBLIC_DIR = path.resolve(SOURCE_DIR, "..", "public");
 const LOGIN_PATH = path.join(PUBLIC_DIR, "login.html");
 const LOGIN_SCRIPT_PATH = path.join(PUBLIC_DIR, "login.js");
 const STYLES_PATH = path.join(PUBLIC_DIR, "styles.css");
-const SERVER_VERSION = "0.5.0";
+const SERVER_VERSION = "0.5.1";
 const TERMINAL_ORDER_STATUSES = new Set([
   "successful",
   "action_required",
@@ -331,6 +332,28 @@ function normalizedChoiceText(value) {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, " ")
     .trim();
+}
+
+function returnedRestaurantMenuId(data) {
+  const source =
+    data && typeof data === "object" && !Array.isArray(data) ? data : {};
+  const candidates = [
+    source.menu_id,
+    source.menuId,
+    source.store?.menu_id,
+    source.store?.menuId,
+    source.item?.menu_id,
+    source.item?.menuId
+  ];
+  for (const candidate of candidates) {
+    if (candidate !== undefined && candidate !== null) {
+      const value = String(candidate).trim();
+      if (value) {
+        return value;
+      }
+    }
+  }
+  return undefined;
 }
 
 function rawItemDetails(data) {
@@ -1075,28 +1098,16 @@ export function createDoorDashApp({
         { project: (data) => data }
       );
     } catch {
-      // The full-menu lookup below is an independent read-only fallback.
+      // Restaurant item details accepts store_id as its menu context.
     }
     const storeMenuId =
       storeDetails?.success === false || storeDetails?.success === "false"
         ? undefined
-        : storeDetails?.menu_id ||
-          storeDetails?.menuId ||
-          storeDetails?.store?.menu_id ||
-          storeDetails?.store?.menuId;
-    if (storeMenuId !== undefined && String(storeMenuId).trim()) {
-      return String(storeMenuId);
+        : returnedRestaurantMenuId(storeDetails);
+    if (storeMenuId) {
+      return storeMenuId;
     }
-
-    const menu = await executeCli(menuArgs({ storeId: input.storeId }), {
-      project: (data) => projectWithContract(contracts.menu, data)
-    });
-    if (!menu.menu_id) {
-      throw new DoorDashCliError(
-        "DoorDash did not return the menu ID needed for restaurant item details."
-      );
-    }
-    return menu.menu_id;
+    return input.storeId;
   }
 
   async function getItemDetails(input) {
@@ -1131,17 +1142,20 @@ export function createDoorDashApp({
           itemId: input.itemId
         }),
         {
-          project: (data) =>
-            projectWithContract(contracts.itemDetails, {
+          project: (data) => {
+            const responseMenuId =
+              returnedRestaurantMenuId(data) || menuId;
+            return projectWithContract(contracts.itemDetails, {
               ...data,
-              menu_id: data?.menu_id || menuId,
+              menu_id: responseMenuId,
               mcp_option_queries: input.optionQueries,
               store:
                 data?.store ||
                 (data?.store_id
                   ? undefined
                   : { store_id: input.storeId })
-            })
+            });
+          }
         }
       );
       return toToolResult(projected);
@@ -1160,7 +1174,11 @@ export function createDoorDashApp({
       const sourceOrder = await executeCli(
         receiptArgs({ orderUuid: input.orderUuid }),
         {
-          project: (data) => projectWithContract(contracts.receipt, data)
+          project: (data) =>
+            projectWithContract(contracts.receipt, {
+              ...data,
+              mcp_order_uuid: input.orderUuid
+            })
         }
       );
       if (sourceOrder.order_uuid !== input.orderUuid) {
@@ -1281,6 +1299,113 @@ export function createDoorDashApp({
       });
       return toToolResult(projected);
     } catch (error) {
+      if (error?.name === "DoorDashOperationError") {
+        try {
+          const history = await executeCli(
+            listOrdersArgs({ max: 25, days: 365 }),
+            {
+              project: (data) =>
+                projectWithContract(contracts.orderList, data)
+            }
+          );
+          const storeOrders = history.orders.filter(
+            (order) => order.store?.store_id === input.storeId
+          );
+          const seenItemIds = new Set();
+          const historicalItems = [];
+          for (const order of storeOrders) {
+            for (const item of order.items || []) {
+              if (
+                !item.item_id ||
+                !item.name ||
+                seenItemIds.has(item.item_id)
+              ) {
+                continue;
+              }
+              seenItemIds.add(item.item_id);
+              historicalItems.push(item);
+            }
+          }
+          const matchingItems = input.query
+            ? historicalItems.filter(
+                (item) =>
+                  normalizedChoiceText(item.name) ===
+                  normalizedChoiceText(input.query)
+              )
+            : historicalItems.slice(0, 5);
+          const currentItems = [];
+          const authoritativeMenuIds = new Set();
+          for (const item of matchingItems.slice(0, 5)) {
+            try {
+              let authoritativeMenuId;
+              const details = await executeCli(
+                restaurantItemDetailsArgs({
+                  storeId: input.storeId,
+                  menuId: input.storeId,
+                  itemId: item.item_id
+                }),
+                {
+                  project: (data) => {
+                    authoritativeMenuId = returnedRestaurantMenuId(data);
+                    const responseMenuId =
+                      authoritativeMenuId || input.storeId;
+                    return projectWithContract(contracts.itemDetails, {
+                      ...data,
+                      menu_id: responseMenuId,
+                      store:
+                        data?.store || {
+                          store_id: input.storeId,
+                          menu_id: responseMenuId,
+                          name: storeOrders[0]?.store?.name
+                        }
+                    });
+                  }
+                }
+              );
+              if (
+                comparableItemId(details.item.item_id) !==
+                  comparableItemId(item.item_id) ||
+                normalizedChoiceText(details.item.name) !==
+                  normalizedChoiceText(item.name) ||
+                (input.query &&
+                  normalizedChoiceText(details.item.name) !==
+                    normalizedChoiceText(input.query))
+              ) {
+                continue;
+              }
+              if (authoritativeMenuId) {
+                authoritativeMenuIds.add(authoritativeMenuId);
+              }
+              currentItems.push(details.item);
+            } catch {
+              // Keep checking other exact history matches.
+            }
+          }
+          if (currentItems.length) {
+            const effectiveMenuId =
+              authoritativeMenuIds.size === 1
+                ? [...authoritativeMenuIds][0]
+                : input.storeId;
+            const projected = projectWithContract(contracts.menu, {
+              success: true,
+              menu_id: effectiveMenuId,
+              store: {
+                store_id: input.storeId,
+                menu_id: effectiveMenuId,
+                name: storeOrders[0]?.store?.name
+              },
+              items: currentItems,
+              truncated: true,
+              warning: input.query
+                ? "DoorDash's full-menu lookup failed. Returned current details for exact-name matches recovered from bounded recent order history, with at most five matches checked; this is not an exhaustive menu search. store_id is the effective restaurant menu context."
+                : "DoorDash's full-menu lookup failed. Returned up to five current items recovered from recent order history; this is not the store's complete menu. store_id is the effective restaurant menu context."
+            });
+            return toToolResult(projected);
+          }
+        } catch {
+          // Preserve the original full-menu operational failure below.
+        }
+      }
       return toolError(error, contracts.menu);
     }
   }

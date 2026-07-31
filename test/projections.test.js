@@ -106,6 +106,87 @@ test("pricing prefers the final total and classifies discounts once", () => {
   ]);
 });
 
+test("receipt pricing distinguishes before-tip, tip, and exact total lines", () => {
+  const projected = projectWithContract(contracts.receipt, {
+    order_uuid: "order-1",
+    items: [],
+    line_items: [
+      {
+        charge_id: "TOTAL_BEFORE_TIP",
+        label: "Total before tip",
+        final_money: { unit_amount: 2000 }
+      },
+      {
+        charge_id: "DASHER_TIP",
+        label: "Dasher Tip",
+        final_money: { unit_amount: 500 }
+      },
+      {
+        charge_id: "TOTAL",
+        label: "Total",
+        final_money: { unit_amount: 2500 }
+      }
+    ]
+  });
+
+  assert.equal(projected.pricing.tip, 5);
+  assert.equal(projected.pricing.total, 25);
+});
+
+test("receipt parses live orders[].order_items and binds the requested UUID", () => {
+  const projected = projectWithContract(contracts.receipt, {
+    success: true,
+    mcp_order_uuid: "order-live",
+    store_id: "25021439",
+    store_name: "Chick-fil-A",
+    line_items: [
+      {
+        charge_id: "TOTAL",
+        label: "Total",
+        final_money: { unit_amount: 1699 }
+      }
+    ],
+    orders: [
+      {
+        id: "internal-order",
+        order_items: [
+          {
+            id: "internal-line",
+            quantity: 1,
+            item: {
+              id: "9459662774",
+              name: "Spicy Chicken Sandwich Deluxe Meal",
+              price_monetary_fields: { unit_amount: 1699 }
+            },
+            options: [
+              {
+                id: "31718037616",
+                quantity: 1,
+                item_extra_option: {
+                  id: "31718037616",
+                  name: "Spicy Deluxe w/ Pepper Jack Meal"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  });
+
+  assert.equal(projected.order_uuid, "order-live");
+  assert.equal(projected.store.store_id, "25021439");
+  assert.equal(projected.items.length, 1);
+  assert.equal(projected.items[0].item_id, "9459662774");
+  assert.equal(projected.items[0].name, "Spicy Chicken Sandwich Deluxe Meal");
+  assert.equal(projected.items[0].selected_options[0].option_id, "31718037616");
+  assert.equal(
+    projected.items[0].selected_options[0].option_name,
+    "Spicy Deluxe w/ Pepper Jack Meal"
+  );
+  assert.equal(projected.pricing.total, 16.99);
+});
+
 test("string and boolean aliases stay typed instead of becoming truthy junk", () => {
   const stores = projectWithContract(contracts.storeSearch, {
     stores: [

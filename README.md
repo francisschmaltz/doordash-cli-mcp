@@ -191,16 +191,23 @@ use the coordinates of the account-wide default address. They do not accept a
 location override. The wrapper returns an error instead of guessing when
 DoorDash has no marked default or the default has no coordinates.
 
-`get_menu` accepts `store_id`, not `menu_id`; it returns the authoritative
-`menu_id` for later item-detail and cart calls. Its optional `query` filters a
-restaurant menu to the requested dish name.
+`get_menu` accepts `store_id`, not `menu_id`; it returns the effective menu
+context for later item-detail and cart calls. Its optional `query` filters a
+restaurant menu to the requested dish name. If DoorDash's full-menu lookup
+fails, the wrapper recovers recent item IDs from bounded order history and
+verifies them through current restaurant item details. An exact-name query
+checks at most five historical matches and is not an exhaustive menu search;
+without one, the fallback returns at most five and explicitly warns that it is
+not the complete menu.
 `get_item_details` routes `i_`-prefixed IDs, plus bare historical item IDs
 paired with a restaurant `menu_id`, through the restaurant modifier endpoint.
-Other item IDs use grocery or retail details. On a large modifier tree, pass
+For an `i_` ID with no returned menu ID, the wrapper uses `store_id` as the
+restaurant menu context. Other item IDs use grocery or retail details. On a large modifier tree, pass
 `option_queries` such as `["Ranch"]` to receive root choices plus compact
 matching paths instead of dumping the entire tree.
-Without `query`, `get_menu` returns at most 50 items and tells the caller to
-retry with the dish name when more were omitted.
+When the full-menu endpoint succeeds, `get_menu` returns at most 50 items
+without `query` and tells the caller to retry with the dish name when more were
+omitted.
 A zero-match query says not to repeat it unchanged: try one broader dish name
 or inspect the capped menu once without a query.
 

@@ -186,6 +186,134 @@ test("an option_id disambiguates repeated branch IDs and preserves quantity two"
   );
 });
 
+test("defers a unique active name until requested branches expose every match", () => {
+  const groups = [
+    {
+      group_id: "meal",
+      name: "Choose",
+      min_selections: 1,
+      max_selections: 1,
+      options: [
+        {
+          option_id: "pepper-jack-meal",
+          name: "Spicy Deluxe w/ Pepper Jack Meal",
+          modifier_groups: [
+            {
+              group_id: "sandwich",
+              name: "Choose",
+              min_selections: 1,
+              max_selections: 1,
+              options: [
+                {
+                  option_id: "pepper-jack-sandwich",
+                  name: "Spicy Deluxe Sandwich w/ Pepper Jack",
+                  modifier_groups: [
+                    {
+                      group_id: "sandwich-sauce",
+                      name: "Choose your dipping sauce",
+                      min_selections: 0,
+                      max_selections: 2,
+                      options: [
+                        {
+                          option_id: "ranch-sandwich",
+                          name: "Garden Herb Ranch Sauce"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              group_id: "meal-side",
+              name: "Choose",
+              min_selections: 1,
+              max_selections: 1,
+              options: [
+                {
+                  option_id: "meal-sides",
+                  name: "Meal Sides",
+                  modifier_groups: [
+                    {
+                      group_id: "side",
+                      name: "Choose",
+                      min_selections: 1,
+                      max_selections: 1,
+                      options: [
+                        {
+                          option_id: "fries",
+                          name: "Chick-fil-A Waffle Potato Fries®",
+                          modifier_groups: [
+                            {
+                              group_id: "fries-size",
+                              name: "Choose",
+                              min_selections: 1,
+                              max_selections: 1,
+                              options: [
+                                {
+                                  option_id: "medium-fries",
+                                  name: "Medium Chick-fil-A Waffle Potato Fries®",
+                                  modifier_groups: [
+                                    {
+                                      group_id: "fries-sauce",
+                                      name: "Choose your dipping sauce",
+                                      min_selections: 0,
+                                      max_selections: 2,
+                                      options: [
+                                        {
+                                          option_id: "ranch-fries",
+                                          name: "Garden Herb Ranch Sauce"
+                                        }
+                                      ]
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ];
+  const requestedOptions = [
+    { name: "Spicy Deluxe w/ Pepper Jack Meal" },
+    { name: "Spicy Deluxe Sandwich w/ Pepper Jack" },
+    { name: "Meal Sides" },
+    { name: "Chick-fil-A Waffle Potato Fries®" },
+    { name: "Medium Chick-fil-A Waffle Potato Fries®" },
+    { name: "Garden Herb Ranch Sauce", quantity: 2 }
+  ];
+
+  const ambiguous = resolveModifierSelections(groups, { requestedOptions });
+  assert.match(
+    ambiguous.problems.join(" "),
+    /Garden Herb Ranch Sauce.*ambiguous/i
+  );
+  assert.equal(
+    flattenSelections(ambiguous.selections).some((option) =>
+      /Ranch/.test(option.name)
+    ),
+    false
+  );
+  const candidates = flattenModifierGroups(ambiguous.modifier_groups);
+  assert.deepEqual(
+    candidates.flatMap((group) =>
+      group.options
+        .filter((option) => /Ranch/.test(option.name))
+        .map((option) => option.option_id)
+    ).sort(),
+    ["ranch-fries", "ranch-sandwich"]
+  );
+});
+
 test("validates nested options against their immediate supplied parent", () => {
   const groups = [
     {

@@ -156,7 +156,12 @@ The wire contract has one value per fact:
 Use a canonical input such as
 `{"store_id":"928163","query":"Margherita Pizza"}`. The optional `query`
 filters the returned menu; it does not change DoorDash. `get_menu` takes
-`store_id`, not `menu_id`; the response supplies `menu_id` for the next call.
+`store_id`, not `menu_id`; the response supplies the effective menu context for
+the next call. If the full-menu endpoint fails, an exact-name query can recover
+matching historical item IDs and verify them through current item details. It
+checks at most five matches from bounded recent history and is not exhaustive.
+An unfiltered fallback returns at most five verified recent items and warns
+that the result is not a complete menu.
 If the user already named exact options, `add_cart_items` can resolve them.
 Use `get_item_details` to inspect unknown or nested choices.
 
@@ -206,9 +211,11 @@ Use `get_item_details` to inspect unknown or nested choices.
 }
 ```
 
-For a bare restaurant item ID copied from order history, provide its known
-restaurant `menu_id`. On a large modifier tree, `option_queries` returns root
-choices plus bounded paths matching those names instead of the entire tree:
+For an `i_` restaurant item ID copied from order history, `menu_id` may be
+omitted; the server uses `store_id` as the restaurant menu context when
+DoorDash supplies no separate menu ID. On a large modifier tree,
+`option_queries` returns root choices plus bounded paths matching those names
+instead of the entire tree:
 
 ```json
 {
