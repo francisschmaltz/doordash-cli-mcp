@@ -8,7 +8,6 @@ import {
   deleteCartArgs,
   findItemsArgs,
   findNearbyStoresArgs,
-  itemDetailsArgs,
   listAddressesArgs,
   listCartsArgs,
   listOrdersArgs,
@@ -88,8 +87,21 @@ const selectedCartOptionSchema = z.lazy(() =>
 
 const cartItemSchema = z.object({
   itemId: idSchema,
-  itemName: z.string().min(1).max(500),
+  itemName: z
+    .string()
+    .min(1)
+    .max(500)
+    .describe(
+      "The menu item's real name, not a customization label. Put choices such as Sweet Corn in requestedOptions or nestedOptions."
+    ),
   quantity: z.number().positive().max(10_000).default(1),
+  requestedOptions: z
+    .array(z.string().min(1).max(300))
+    .max(50)
+    .optional()
+    .describe(
+      "Current option names explicitly requested for this line, such as Sweet Corn, Rotisserie Chicken, or Utensils. The server resolves them before changing the cart and rejects unmatched choices."
+    ),
   nestedOptions: z
     .array(selectedCartOptionSchema)
     .max(100)
@@ -115,6 +127,27 @@ const promoInputSchema = {
   adGroupId: idSchema.optional(),
   adId: idSchema.optional()
 };
+
+function orderReferenceSchema() {
+  return z
+    .object({
+      order_uuid: idSchema
+        .optional()
+        .describe(
+          "Preferred: copy order_uuid exactly from list_orders or order_submit."
+        ),
+      orderUuid: idSchema
+        .optional()
+        .describe("Camel-case alias for order_uuid.")
+    })
+    .refine((value) => Boolean(value.order_uuid || value.orderUuid), {
+      message: "Provide order_uuid (preferred) or orderUuid."
+    });
+}
+
+function orderUuidFromInput(input) {
+  return input.order_uuid || input.orderUuid;
+}
 
 function annotations({
   readOnly,
@@ -236,16 +269,17 @@ export function registerDoorDashTools(server, context) {
     server,
     "get_item_details",
     {
-      title: "Get DoorDash Store Item Details",
+      title: "Get DoorDash Item Details",
       description:
-        "Return grocery or retail item pricing, purchase units, menu ID, and available options.",
+        "Return current item pricing and options. Item IDs prefixed i_ are restaurant menu items and automatically use restaurant modifier lookup; other IDs use grocery or retail lookup. For restaurant items, menuId is optional because the server can resolve it.",
       inputSchema: z.object({
         storeId: idSchema,
-        itemId: idSchema
+        itemId: idSchema,
+        menuId: idSchema.optional()
       }),
       annotations: annotations({ readOnly: true })
     },
-    async (input) => context.invoke(itemDetailsArgs(input))
+    async (input) => context.getItemDetails(input)
   );
 
   register(
@@ -254,7 +288,7 @@ export function registerDoorDashTools(server, context) {
     {
       title: "Get DoorDash Restaurant Menu",
       description:
-        "Return a restaurant menu and menu ID. Before adding an item, inspect every modifier group. If any group has min_selections greater than zero, get item details and select enough options to satisfy every required group.",
+        "Return a restaurant menu and menu ID. Items with has_modifiers require get_item_details or get_restaurant_item_details before adding so optional add-ons are not lost and every required group is satisfied.",
       inputSchema: z.object({
         storeId: idSchema
       }),
@@ -267,9 +301,9 @@ export function registerDoorDashTools(server, context) {
     server,
     "get_restaurant_item_details",
     {
-      title: "Get DoorDash Restaurant Item Details",
+      title: "Get DoorDash Restaurant Item Modifiers",
       description:
-        "Return restaurant item pricing and recursive modifier choices. Modifier groups describe constraints and must not be sent as cart selections. For add_cart_items, send the chosen option_id nodes only and satisfy every group whose min_selections is greater than zero.",
+        "RESTAURANT ITEMS ONLY. Return pricing and every recursive modifier choice, including optional add-ons. Modifier groups describe constraints and must not be sent as cart selections. For add_cart_items, send chosen option_id nodes or plain-language requestedOptions and satisfy every group whose min_selections is greater than zero.",
       inputSchema: z.object({
         storeId: idSchema,
         menuId: idSchema,
@@ -318,12 +352,18 @@ export function registerDoorDashTools(server, context) {
     {
       title: "Add DoorDash Cart Items",
       description:
-        "Add items to a restaurant or retail cart, then automatically return a browser checkout_url whenever the cart contains added items. Before calling, inspect item details and include selected option_id entries for every modifier group whose min_selections is greater than zero. Copy the returned fields directly: nestedOptions: [{\"option_id\":\"o_...\",\"name\":\"Chosen option\"}]. nestedOptions contains selected options only: keep ordinary selections flat, never pass group_id or extra_id nodes such as e_..., and use recursive options only when a selected option exposes its own nested modifier groups. Delivery uses the account-wide default DoorDash address; there is no per-cart address input. Quantities are additive and this is not idempotent. When cartUuid is omitted, the server checks for an active same-store cart and refuses to add if one exists; follow recovery_tool show_cart, then either return its checkout link, extend it with that cartUuid after confirmation, or delete and replace it. Partial failures may still add some items.",
+        "Send every requested line together in one call; never add one item at a time. The server preflights all i_-prefixed restaurant items and every modifier group before making one DoorDash cart write, resolves requestedOptions such as Sweet Corn, and returns all modifier groups without changing the cart when a required choice is missing. itemName labels do not customize items. You may instead copy exact selected option_id entries as nestedOptions: [{\"option_id\":\"o_...\",\"name\":\"Chosen option\"}]; include every group whose min_selections is greater than zero, never pass group_id or extra_id nodes such as e_..., and recurse only when a selected option exposes nested groups. After success, the tool automatically returns checkout_url. Delivery uses the account-wide default address. Quantities are additive and this is not idempotent. With no cartUuid, an empty same-store cart is safely reused; a nonempty cart returns ACTIVE_CART_EXISTS so it cannot be duplicated.",
       inputSchema: z
         .object({
           storeId: idSchema,
           menuId: idSchema,
-          items: z.array(cartItemSchema).min(1).max(100),
+          items: z
+            .array(cartItemSchema)
+            .min(1)
+            .max(100)
+            .describe(
+              "The complete batch of every requested cart line. Put differently customized copies on separate lines; use quantity only for truly identical copies."
+            ),
           cartUuid: idSchema.optional(),
           fulfillment: fulfillmentSchema.default("delivery"),
           groupCart: z.boolean().default(false),
@@ -476,13 +516,14 @@ export function registerDoorDashTools(server, context) {
     {
       title: "Get DoorDash Receipt",
       description:
-        "Fetch one past order's itemized receipt, fees, tax, tip, total, credits, and masked payment information.",
-      inputSchema: z.object({
-        orderUuid: idSchema
-      }),
+        "Fetch one past order's itemized receipt, fees, tax, tip, total, credits, and masked payment information. Copy order_uuid from list_orders.",
+      inputSchema: orderReferenceSchema(),
       annotations: annotations({ readOnly: true })
     },
-    async (input) => context.invoke(receiptArgs(input))
+    async (input) =>
+      context.invoke(
+        receiptArgs({ orderUuid: orderUuidFromInput(input) })
+      )
   );
 
   register(
@@ -491,16 +532,17 @@ export function registerDoorDashTools(server, context) {
     {
       title: "Reorder DoorDash Order",
       description:
-        "Create a new cart from a past order. Compare the new cart with history because unavailable items can be silently dropped.",
-      inputSchema: z.object({
-        orderUuid: idSchema
-      }),
+        "Create a new cart from a past order using order_uuid from list_orders. Compare the new cart with history because unavailable items can be silently dropped.",
+      inputSchema: orderReferenceSchema(),
       annotations: annotations({
         readOnly: false,
         idempotent: false
       })
     },
-    async (input) => context.invoke(reorderArgs(input))
+    async (input) =>
+      context.invoke(
+        reorderArgs({ orderUuid: orderUuidFromInput(input) })
+      )
   );
 
   register(
@@ -509,13 +551,14 @@ export function registerDoorDashTools(server, context) {
     {
       title: "Check DoorDash Order Status",
       description:
-        "Check whether a submitted order is pending, successful, action required, failed, or not found.",
-      inputSchema: z.object({
-        orderUuid: idSchema
-      }),
+        "Check whether a submitted order is pending, successful, action required, failed, or not found. Copy order_uuid exactly from list_orders or order_submit; orderUuid remains accepted as an alias.",
+      inputSchema: orderReferenceSchema(),
       annotations: annotations({ readOnly: true })
     },
-    async (input) => context.invoke(orderStatusArgs(input))
+    async (input) =>
+      context.invoke(
+        orderStatusArgs({ orderUuid: orderUuidFromInput(input) })
+      )
   );
 
   register(

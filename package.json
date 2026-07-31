@@ -1,6 +1,6 @@
 {
   "name": "doordash-cli-mcp",
-  "version": "0.4.1",
+  "version": "0.4.3",
   "private": true,
   "description": "Streamable HTTP MCP wrapper for DoorDash CLI",
   "type": "module",

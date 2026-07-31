@@ -12,11 +12,14 @@ import { createTokenVerifier } from "./auth.js";
 import {
   addCartItemsArgs,
   checkoutLinkArgs,
+  itemDetailsArgs,
   listAddressesArgs,
   listCartsArgs,
   listPaymentMethodsArgs,
+  menuArgs,
   orderStatusArgs,
   previewOrderArgs,
+  restaurantItemDetailsArgs,
   submitOrderArgs
 } from "./command-args.js";
 import {
@@ -40,7 +43,7 @@ const PUBLIC_DIR = path.resolve(SOURCE_DIR, "..", "public");
 const LOGIN_PATH = path.join(PUBLIC_DIR, "login.html");
 const LOGIN_SCRIPT_PATH = path.join(PUBLIC_DIR, "login.js");
 const STYLES_PATH = path.join(PUBLIC_DIR, "styles.css");
-const SERVER_VERSION = "0.4.1";
+const SERVER_VERSION = "0.4.3";
 const TERMINAL_ORDER_STATUSES = new Set([
   "successful",
   "action_required",
@@ -106,6 +109,170 @@ function defaultAddressCoordinates(addressList) {
     lat: defaultAddress.latitude,
     lng: defaultAddress.longitude
   };
+}
+
+function normalizedChoiceText(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function cartOptionId(option) {
+  return option?.option_id || option?.optionId || option?.id;
+}
+
+function optionMatchesHint(option, group, hint) {
+  const optionName = normalizedChoiceText(option.name);
+  const groupName = normalizedChoiceText(group.name);
+  const requested = normalizedChoiceText(hint);
+  if (!optionName || !requested) {
+    return false;
+  }
+  if (requested === groupName) {
+    return /\byes\b/.test(optionName);
+  }
+  if (
+    requested === `no ${groupName}` ||
+    requested === `${groupName} no`
+  ) {
+    return /\bno\b/.test(optionName);
+  }
+  if (
+    requested === optionName ||
+    requested.includes(optionName)
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function modifierTreeMatchesHint(groups = [], hint) {
+  return groups.some((group) =>
+    (group.options || []).some(
+      (option) =>
+        optionMatchesHint(option, group, hint) ||
+        modifierTreeMatchesHint(option.modifier_groups, hint)
+    )
+  );
+}
+
+function modifierResolution(groups = [], selections = [], hints = []) {
+  const remaining = [...selections];
+  const resolved = [];
+  const problems = [];
+
+  for (const group of groups) {
+    const options = (group.options || []).filter(
+      (option) => option.available !== false && option.option_id
+    );
+    const optionIds = new Set(options.map((option) => option.option_id));
+    const chosen = [];
+
+    for (let index = remaining.length - 1; index >= 0; index -= 1) {
+      if (optionIds.has(cartOptionId(remaining[index]))) {
+        chosen.unshift(remaining[index]);
+        remaining.splice(index, 1);
+      }
+    }
+
+    for (const option of options) {
+      if (
+        !chosen.some(
+          (selection) => cartOptionId(selection) === option.option_id
+        ) &&
+        hints.some((hint) => optionMatchesHint(option, group, hint))
+      ) {
+        chosen.push({
+          option_id: option.option_id,
+          name: option.name,
+          quantity: 1
+        });
+      }
+    }
+
+    const minimum =
+      Number.isFinite(group.min_selections) && group.min_selections > 0
+        ? group.min_selections
+        : group.required
+          ? 1
+          : 0;
+    const maximum =
+      Number.isFinite(group.max_selections) && group.max_selections > 0
+        ? group.max_selections
+        : Infinity;
+
+    if (chosen.length < minimum && options.length === minimum) {
+      for (const option of options) {
+        if (
+          !chosen.some(
+            (selection) => cartOptionId(selection) === option.option_id
+          )
+        ) {
+          chosen.push({
+            option_id: option.option_id,
+            name: option.name,
+            quantity: 1
+          });
+        }
+      }
+    }
+
+    if (chosen.length < minimum) {
+      problems.push(
+        `Select at least ${minimum} option${minimum === 1 ? "" : "s"} for ${group.name || group.group_id || "a required modifier group"}.`
+      );
+    }
+    if (chosen.length > maximum) {
+      problems.push(
+        `Select no more than ${maximum} option${maximum === 1 ? "" : "s"} for ${group.name || group.group_id || "a modifier group"}.`
+      );
+    }
+
+    for (const selection of chosen) {
+      const option = options.find(
+        (candidate) => candidate.option_id === cartOptionId(selection)
+      );
+      if (!option) {
+        continue;
+      }
+      const nested = modifierResolution(
+        option.modifier_groups,
+        selection.options,
+        hints
+      );
+      problems.push(...nested.problems);
+      resolved.push({
+        option_id: option.option_id,
+        name: option.name || selection.name || option.option_id,
+        quantity: selection.quantity ?? 1,
+        ...(nested.selections.length
+          ? { options: nested.selections }
+          : {})
+      });
+    }
+  }
+
+  for (const selection of remaining) {
+    problems.push(
+      `Selected option ${cartOptionId(selection) || "(missing ID)"} is not available for this item.`
+    );
+  }
+
+  return { selections: resolved, problems };
+}
+
+function optionSignature(item) {
+  function signature(options = []) {
+    return options
+      .map(
+        (option) =>
+          `${cartOptionId(option) || ""}[${signature(option.options)}]`
+      )
+      .sort()
+      .join(",");
+  }
+  return signature(item.nestedOptions);
 }
 
 function statusValue(statusResult) {
@@ -325,11 +492,181 @@ export function createDoorDashApp({
     }
   }
 
+  async function getItemDetails(input, authInfo) {
+    if (!input.itemId.startsWith("i_") && !input.menuId) {
+      return invoke(itemDetailsArgs(input), {}, authInfo);
+    }
+
+    try {
+      let menuId = input.menuId;
+      if (!menuId) {
+        const menu = await executeCli(menuArgs({ storeId: input.storeId }), {
+          project: (data) => projectWithContract(contracts.menu, data)
+        });
+        menuId = menu.menu_id;
+        if (!menuId) {
+          throw new DoorDashCliError(
+            "DoorDash did not return the menu ID needed for restaurant item details."
+          );
+        }
+      }
+      return invoke(
+        restaurantItemDetailsArgs({
+          storeId: input.storeId,
+          menuId,
+          itemId: input.itemId
+        }),
+        {},
+        authInfo
+      );
+    } catch (error) {
+      return toolError(error, contracts.itemDetails);
+    }
+  }
+
+  async function preflightCartItems(input) {
+    const restaurantItemIds = [
+      ...new Set(
+        input.items
+          .map((item) => item.itemId)
+          .filter((itemId) => itemId.startsWith("i_"))
+      )
+    ];
+    if (restaurantItemIds.length === 0) {
+      return { items: input.items, itemErrors: [] };
+    }
+
+    const detailsByItemId = new Map(
+      await Promise.all(
+        restaurantItemIds.map(async (itemId) => {
+          const details = await executeCli(
+            restaurantItemDetailsArgs({
+              storeId: input.storeId,
+              menuId: input.menuId,
+              itemId
+            }),
+            {
+              project: (data) =>
+                projectWithContract(contracts.itemDetails, data)
+            }
+          );
+          return [itemId.replace(/^i_/, ""), details.item];
+        })
+      )
+    );
+
+    const items = [];
+    const itemErrors = [];
+    for (const requestedItem of input.items) {
+      const details = detailsByItemId.get(
+        requestedItem.itemId.replace(/^i_/, "")
+      );
+      if (!details) {
+        items.push(requestedItem);
+        continue;
+      }
+
+      const requestedHints = [...(requestedItem.requestedOptions || [])];
+      const customName =
+        normalizedChoiceText(requestedItem.itemName) !==
+        normalizedChoiceText(details.name)
+          ? requestedItem.itemName
+          : null;
+      const hints = [
+        ...requestedHints,
+        ...(customName ? [customName] : [])
+      ];
+      const resolution = modifierResolution(
+        details.modifier_groups,
+        requestedItem.nestedOptions,
+        hints
+      );
+      for (const hint of requestedHints) {
+        if (!modifierTreeMatchesHint(details.modifier_groups, hint)) {
+          resolution.problems.push(
+            `Requested option "${hint}" does not match a current modifier choice.`
+          );
+        }
+      }
+      if (
+        customName &&
+        !modifierTreeMatchesHint(details.modifier_groups, customName)
+      ) {
+        resolution.problems.push(
+          `"${customName}" is not the menu item name and does not identify a current modifier choice.`
+        );
+      }
+      const resolvedItem = {
+        ...requestedItem,
+        itemName: details.name || requestedItem.itemName,
+        nestedOptions: resolution.selections
+      };
+      items.push(resolvedItem);
+
+      if (resolution.problems.length) {
+        itemErrors.push({
+          request: {
+            item_id: requestedItem.itemId,
+            item_name: requestedItem.itemName,
+            quantity: requestedItem.quantity
+          },
+          message: `${resolution.problems.join(" ")} No cart changes were made. Send every requested item together in one add_cart_items call after resolving these choices.`,
+          modifier_groups: details.modifier_groups
+        });
+      }
+    }
+
+    const seenVariants = new Map();
+    for (const [index, item] of items.entries()) {
+      const key = `${item.itemId.replace(/^i_/, "")}:${optionSignature(item)}`;
+      const earlier = seenVariants.get(key);
+      if (
+        earlier &&
+        normalizedChoiceText(earlier.originalName) !==
+          normalizedChoiceText(input.items[index].itemName)
+      ) {
+        itemErrors.push({
+          request: {
+            item_id: input.items[index].itemId,
+            item_name: input.items[index].itemName,
+            quantity: input.items[index].quantity
+          },
+          message:
+            `This line has the same item ID and selected options as "${earlier.originalName}". ` +
+            "Changing itemName does not customize a DoorDash item. Add the distinguishing option through requestedOptions or nestedOptions. No cart changes were made.",
+          modifier_groups:
+            detailsByItemId.get(item.itemId.replace(/^i_/, ""))
+              ?.modifier_groups
+        });
+      } else {
+        seenVariants.set(key, {
+          item,
+          originalName: input.items[index].itemName
+        });
+      }
+    }
+
+    return { items, itemErrors };
+  }
+
   async function addCartItems(input) {
     try {
-      if (!input.cartUuid) {
+      const preflight = await preflightCartItems(input);
+      if (preflight.itemErrors.length) {
+        const projected = projectWithContract(contracts.cart, {
+          cart: { items: [] },
+          item_errors: preflight.itemErrors
+        });
+        return toToolResult(projected, { isError: true });
+      }
+
+      let addInput = {
+        ...input,
+        items: preflight.items
+      };
+      if (!addInput.cartUuid) {
         const cartList = await executeCli(
-          listCartsArgs({ storeId: input.storeId }),
+          listCartsArgs({ storeId: addInput.storeId }),
           {
             project: (data) =>
               projectWithContract(contracts.cartList, data)
@@ -339,17 +676,24 @@ export function createDoorDashApp({
           (cart) => cart.cart_uuid
         );
         if (existingCart) {
-          throw new DoorDashCliError(
-            `An active DoorDash cart already exists at this store (${existingCart.cart_uuid}). No items were added. Call show_cart with that cartUuid first. If it already matches the request, call create_checkout_link; otherwise ask whether to extend it using that cartUuid or replace it with delete_cart.`,
-            {
-              code: "ACTIVE_CART_EXISTS",
+          if (existingCart.items.length === 0) {
+            addInput = {
+              ...addInput,
               cartUuid: existingCart.cart_uuid
-            }
-          );
+            };
+          } else {
+            throw new DoorDashCliError(
+              `An active DoorDash cart already exists at this store (${existingCart.cart_uuid}). No items were added. Call show_cart with that cartUuid first. If it already matches the request, call create_checkout_link; otherwise ask whether to extend it using that cartUuid or replace it with delete_cart.`,
+              {
+                code: "ACTIVE_CART_EXISTS",
+                cartUuid: existingCart.cart_uuid
+              }
+            );
+          }
         }
       }
 
-      const addResult = await executeCli(addCartItemsArgs(input), {
+      const addResult = await executeCli(addCartItemsArgs(addInput), {
         project: (data) => data
       });
       let projected = projectWithContract(contracts.cart, addResult);
@@ -560,6 +904,7 @@ export function createDoorDashApp({
       activityLog,
       authInfo,
       addCartItems,
+      getItemDetails: (input) => getItemDetails(input, authInfo),
       invoke: (args, options) => invoke(args, options, authInfo),
       invokeAtDefaultAddress: (input, buildArgs) =>
         invokeAtDefaultAddress(input, buildArgs, authInfo),

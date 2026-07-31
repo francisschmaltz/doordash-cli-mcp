@@ -158,6 +158,10 @@ use the coordinates of the account-wide default address. They do not accept a
 location override. The wrapper returns an error instead of guessing when
 DoorDash has no marked default or the default has no coordinates.
 
+`get_item_details` automatically routes `i_`-prefixed menu IDs through the
+restaurant modifier endpoint and can resolve an omitted `menuId`. Other item
+IDs continue to use grocery or retail details.
+
 ### Carts
 
 - `list_carts`
@@ -166,10 +170,21 @@ DoorDash has no marked default or the default has no coordinates.
 - `remove_cart_item`
 - `delete_cart`
 
-The add operation is additive and non-idempotent. It supports delivery/pickup,
-recursive modifiers, group carts, and participant spending limits. Before
-adding an item, satisfy every modifier group whose `min_selections` is greater
-than zero. Copy each selected option into `nestedOptions` as
+The add operation is additive and non-idempotent. Send all requested lines in
+one call. Before making one DoorDash cart write, the wrapper fetches current
+details for every `i_`-prefixed restaurant item and validates the full batch.
+If a required choice is unresolved, it returns every modifier group and makes
+no cart changes. A required group with only one available choice is selected
+automatically; preferences with multiple choices are never guessed.
+
+Plain-language choices may be sent per line in `requestedOptions`, such as
+`["Rotisserie Chicken", "Sweet Corn", "Utensils"]`. They are resolved against
+the current modifier tree, and any unmatched choice blocks the entire batch. A
+customized `itemName` such as `Spicy TanTan with Sweet Corn` is also recognized
+for compatibility, then normalized back to the real menu name. Prefer
+`requestedOptions`; `itemName` itself does not customize an item.
+
+Exact choices may instead be copied into `nestedOptions` as
 `{"option_id":"o_...","name":"Chosen option"}`; `optionId` and legacy `id`
 remain accepted aliases. Do not pass modifier group IDs such as `e_...`.
 Ordinary selections stay flat, while `options` is only for choices that expose
@@ -181,10 +196,11 @@ tool preserves the cart result and tells the caller to use
 `create_checkout_link`.
 
 When `cartUuid` is omitted, the wrapper checks for an active cart at that store
-before adding. If one exists, it returns `ACTIVE_CART_EXISTS` with
-`recovery_tool: show_cart` instead of silently duplicating items. Inspect that
-cart, then return its checkout link when it already matches, explicitly extend
-it using its `cartUuid`, or delete and replace it.
+before adding. An empty cart left by an earlier failed add is reused
+automatically. A nonempty cart returns `ACTIVE_CART_EXISTS` with
+`recovery_tool: show_cart` instead of silently duplicating items. Inspect it,
+then return its checkout link when it already matches, explicitly extend it
+using its `cartUuid`, or delete and replace it.
 
 ### Orders
 
@@ -195,6 +211,10 @@ it using its `cartUuid`, or delete and replace it.
 - `get_receipt`
 - `order_status`
 - `order_submit` — permission-gated
+
+`get_receipt`, `reorder`, and `order_status` accept the output field
+`order_uuid` directly. The older camel-case `orderUuid` input remains an alias,
+so an MCP client never has to translate the wrapper's own order IDs.
 
 Preview supports scheduled orders, delivery/pickup, Priority delivery, credit
 opt-out, and work-benefit budgets.

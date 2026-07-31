@@ -183,16 +183,167 @@ test("cart tools instruct callers to satisfy required options and return checkou
   const detailTool = response.body.result.tools.find(
     (tool) => tool.name === "get_restaurant_item_details"
   );
+  const genericDetailTool = response.body.result.tools.find(
+    (tool) => tool.name === "get_item_details"
+  );
 
   assert.ok(addTool);
+  assert.match(addTool.description, /never add one item at a time/);
+  assert.match(addTool.description, /before making one DoorDash cart write/);
   assert.match(addTool.description, /every modifier group/);
   assert.match(addTool.description, /selected option_id/);
   assert.match(addTool.description, /"option_id":"o_\.\.\."/);
   assert.match(addTool.description, /never pass group_id or extra_id/);
   assert.match(addTool.description, /automatically return.*checkout_url/);
   assert.match(JSON.stringify(addTool.inputSchema), /"option_id"/);
+  assert.match(JSON.stringify(addTool.inputSchema), /"requestedOptions"/);
   assert.ok(detailTool);
   assert.match(detailTool.description, /must not be sent as cart selections/);
+  assert.ok(genericDetailTool);
+  assert.match(genericDetailTool.description, /prefixed i_/);
+  assert.ok(genericDetailTool.inputSchema.properties.menuId);
+
+  await mcpHandler.close();
+  store.close();
+});
+
+test("generic item details auto-routes restaurant IDs and resolves the menu", async () => {
+  const store = new SecurityStore({ databasePath: ":memory:" });
+  const token = store.createToken({
+    name: "Open WebUI",
+    allowPurchases: false
+  });
+  const calls = [];
+  const { mcpHandler } = createTestApp({
+    securityStore: store,
+    runCli: async (args) => {
+      calls.push(args);
+      if (args[0] === "menu") {
+        return cliResult({
+          menu_id: "menu-1",
+          items: []
+        });
+      }
+      if (args[0] === "restaurant-item-details") {
+        return cliResult({
+          item: {
+            item_id: "i_12901175286",
+            name: "Spicy TanTan",
+            has_modifiers: true,
+            extras: [
+              {
+                extra_id: "e_utensils",
+                title: "Utensils",
+                min_num_options: 1,
+                max_num_options: 1,
+                options: [
+                  {
+                    option_id: "o_yes",
+                    name: "Utensils : Yes"
+                  },
+                  {
+                    option_id: "o_no",
+                    name: "Utensils : No"
+                  }
+                ]
+              }
+            ]
+          }
+        });
+      }
+      throw new Error(`Unexpected CLI call: ${args.join(" ")}`);
+    }
+  });
+
+  const response = await mcpRequest(
+    mcpHandler,
+    authInfo(store, token.token),
+    "tools/call",
+    {
+      name: "get_item_details",
+      arguments: {
+        storeId: "store-1",
+        itemId: "i_12901175286"
+      }
+    }
+  );
+
+  assert.equal(response.body.result.isError, undefined);
+  assert.equal(
+    response.body.result.structuredContent.item.name,
+    "Spicy TanTan"
+  );
+  assert.equal(
+    response.body.result.structuredContent.item.has_required_modifiers,
+    true
+  );
+  assert.deepEqual(
+    calls.map((args) => args[0]),
+    ["menu", "restaurant-item-details"]
+  );
+  assert.equal(
+    calls[1][calls[1].indexOf("--item-id") + 1],
+    "12901175286"
+  );
+
+  await mcpHandler.close();
+  store.close();
+});
+
+test("order status accepts order_uuid copied from list_orders", async () => {
+  const store = new SecurityStore({ databasePath: ":memory:" });
+  const token = store.createToken({
+    name: "Open WebUI",
+    allowPurchases: false
+  });
+  const calls = [];
+  const { mcpHandler } = createTestApp({
+    securityStore: store,
+    runCli: async (args) => {
+      calls.push(args);
+      return cliResult({
+        order_uuid: "order-1",
+        status: "successful"
+      });
+    }
+  });
+
+  const list = await mcpRequest(
+    mcpHandler,
+    authInfo(store, token.token),
+    "tools/list",
+    {}
+  );
+  const statusTool = list.body.result.tools.find(
+    (tool) => tool.name === "order_status"
+  );
+  assert.ok(statusTool.inputSchema.properties.order_uuid);
+  assert.ok(statusTool.inputSchema.properties.orderUuid);
+  assert.match(statusTool.description, /Copy order_uuid exactly/);
+
+  const response = await mcpRequest(
+    mcpHandler,
+    authInfo(store, token.token),
+    "tools/call",
+    {
+      name: "order_status",
+      arguments: {
+        order_uuid: "order-1"
+      }
+    }
+  );
+
+  assert.equal(response.body.result.isError, undefined);
+  assert.equal(
+    response.body.result.structuredContent.order_uuid,
+    "order-1"
+  );
+  assert.deepEqual(calls[0], [
+    "order",
+    "status",
+    "--order-uuid",
+    "order-1"
+  ]);
 
   await mcpHandler.close();
   store.close();
@@ -209,6 +360,40 @@ test("add cart returns a checkout URL after adding fully selected items", async 
     securityStore: store,
     runCli: async (args) => {
       calls.push(args);
+      if (args[0] === "restaurant-item-details") {
+        return cliResult({
+          item: {
+            item_id: "i_10523709271",
+            name: "Enchiladas Verdes",
+            extras: [
+              {
+                extra_id: "e_beans",
+                title: "Choice of Beans",
+                min_num_options: 1,
+                max_num_options: 1,
+                options: [
+                  {
+                    option_id: "o_31172333376",
+                    name: "Oaxacan Refried Black"
+                  }
+                ]
+              },
+              {
+                extra_id: "e_protein",
+                title: "Choice of Protein",
+                min_num_options: 1,
+                max_num_options: 1,
+                options: [
+                  {
+                    option_id: "o_42978512124",
+                    name: "Rotisserie Chicken"
+                  }
+                ]
+              }
+            ]
+          }
+        });
+      }
       if (args[0] === "cart" && args[1] === "list") {
         return cliResult({ carts: [] });
       }
@@ -282,13 +467,17 @@ test("add cart returns a checkout URL after adding fully selected items", async 
   assert.deepEqual(
     calls.map((args) => args.slice(0, 2)),
     [
+      ["restaurant-item-details", "--store-id"],
       ["cart", "list"],
       ["cart", "add-items"],
       ["order", "checkout-url"]
     ]
   );
+  const addCall = calls.find(
+    (args) => args[0] === "cart" && args[1] === "add-items"
+  );
   const requestedItems = JSON.parse(
-    calls[1][calls[1].indexOf("--items-json") + 1]
+    addCall[addCall.indexOf("--items-json") + 1]
   );
   assert.deepEqual(
     requestedItems[0].nested_options.map((option) => option.id),
@@ -296,7 +485,257 @@ test("add cart returns a checkout URL after adding fully selected items", async 
   );
   assert.equal(
     requestedItems[0].nested_options[1].name,
-    "o_42978512124"
+    "Rotisserie Chicken"
+  );
+
+  await mcpHandler.close();
+  store.close();
+});
+
+test("add cart preflights variants and sends one complete DoorDash batch", async () => {
+  const store = new SecurityStore({ databasePath: ":memory:" });
+  const token = store.createToken({
+    name: "Open WebUI",
+    allowPurchases: false
+  });
+  const calls = [];
+  const { mcpHandler } = createTestApp({
+    securityStore: store,
+    runCli: async (args) => {
+      calls.push(args);
+      if (args[0] === "restaurant-item-details") {
+        return cliResult({
+          item: {
+            item_id: "i_12901175286",
+            name: "Spicy TanTan",
+            extras: [
+              {
+                extra_id: "e_utensils",
+                title: "Utensils",
+                min_num_options: 1,
+                max_num_options: 1,
+                options: [
+                  {
+                    option_id: "o_utensils_yes",
+                    name: "Utensils : Yes"
+                  },
+                  {
+                    option_id: "o_utensils_no",
+                    name: "Utensils : No"
+                  }
+                ]
+              },
+              {
+                extra_id: "e_toppings",
+                title: "Topping",
+                min_num_options: 0,
+                max_num_options: 0,
+                options: [
+                  {
+                    option_id: "o_sweet_corn",
+                    name: "Sweet Corn"
+                  }
+                ]
+              }
+            ]
+          }
+        });
+      }
+      if (args[0] === "cart" && args[1] === "list") {
+        return cliResult({ carts: [] });
+      }
+      if (args[0] === "cart" && args[1] === "add-items") {
+        return cliResult({
+          cart_uuid: "cart-ramen",
+          cart: {
+            id: "cart-ramen",
+            items: [
+              {
+                id: "line-1",
+                item_id: "12901175286",
+                name: "Spicy TanTan",
+                quantity: 1
+              },
+              {
+                id: "line-2",
+                item_id: "12901175286",
+                name: "Spicy TanTan",
+                quantity: 1
+              }
+            ]
+          }
+        });
+      }
+      if (args[0] === "order" && args[1] === "checkout-url") {
+        return cliResult({
+          cart_uuid: "cart-ramen",
+          checkout_url: "https://www.doordash.test/checkout/cart-ramen"
+        });
+      }
+      throw new Error(`Unexpected CLI call: ${args.join(" ")}`);
+    }
+  });
+
+  const response = await mcpRequest(
+    mcpHandler,
+    authInfo(store, token.token),
+    "tools/call",
+    {
+      name: "add_cart_items",
+      arguments: {
+        storeId: "707534",
+        menuId: "34596353",
+        items: [
+          {
+            itemId: "i_12901175286",
+            itemName: "Spicy TanTan",
+            requestedOptions: ["Utensils"]
+          },
+          {
+            itemId: "i_12901175286",
+            itemName: "Spicy TanTan with Sweet Corn",
+            requestedOptions: ["Utensils"]
+          }
+        ]
+      }
+    }
+  );
+
+  assert.equal(
+    response.body.result.isError,
+    undefined,
+    JSON.stringify(response.body.result)
+  );
+  assert.equal(
+    calls.filter(
+      (args) => args[0] === "restaurant-item-details"
+    ).length,
+    1
+  );
+  assert.equal(
+    calls.filter(
+      (args) => args[0] === "cart" && args[1] === "add-items"
+    ).length,
+    1
+  );
+  const addCall = calls.find(
+    (args) => args[0] === "cart" && args[1] === "add-items"
+  );
+  const items = JSON.parse(
+    addCall[addCall.indexOf("--items-json") + 1]
+  );
+  assert.deepEqual(
+    items.map((item) => item.item_name),
+    ["Spicy TanTan", "Spicy TanTan"]
+  );
+  assert.deepEqual(
+    items.map((item) =>
+      item.nested_options.map((option) => option.id)
+    ),
+    [
+      ["o_utensils_yes"],
+      ["o_utensils_yes", "o_sweet_corn"]
+    ]
+  );
+  assert.equal(
+    response.body.result.structuredContent.checkout_url,
+    "https://www.doordash.test/checkout/cart-ramen"
+  );
+
+  await mcpHandler.close();
+  store.close();
+});
+
+test("add cart reports every modifier before writing when a choice is missing", async () => {
+  const store = new SecurityStore({ databasePath: ":memory:" });
+  const token = store.createToken({
+    name: "Open WebUI",
+    allowPurchases: false
+  });
+  const calls = [];
+  const { mcpHandler } = createTestApp({
+    securityStore: store,
+    runCli: async (args) => {
+      calls.push(args);
+      if (args[0] === "restaurant-item-details") {
+        return cliResult({
+          item: {
+            item_id: "i_12901175286",
+            name: "Spicy TanTan",
+            extras: [
+              {
+                extra_id: "e_utensils",
+                title: "Utensils",
+                min_num_options: 1,
+                max_num_options: 1,
+                options: [
+                  {
+                    option_id: "o_yes",
+                    name: "Utensils : Yes"
+                  },
+                  {
+                    option_id: "o_no",
+                    name: "Utensils : No"
+                  }
+                ]
+              },
+              {
+                extra_id: "e_toppings",
+                title: "Topping",
+                min_num_options: 0,
+                max_num_options: 0,
+                options: [
+                  {
+                    option_id: "o_corn",
+                    name: "Sweet Corn"
+                  }
+                ]
+              }
+            ]
+          }
+        });
+      }
+      throw new Error(`Unexpected CLI call: ${args.join(" ")}`);
+    }
+  });
+
+  const response = await mcpRequest(
+    mcpHandler,
+    authInfo(store, token.token),
+    "tools/call",
+    {
+      name: "add_cart_items",
+      arguments: {
+        storeId: "707534",
+        menuId: "34596353",
+        items: [
+          {
+            itemId: "i_12901175286",
+            itemName: "Spicy TanTan",
+            requestedOptions: ["Imaginary Sauce"]
+          }
+        ]
+      }
+    }
+  );
+
+  assert.equal(response.body.result.isError, true);
+  assert.deepEqual(
+    calls.map((args) => args[0]),
+    ["restaurant-item-details"]
+  );
+  assert.equal(
+    response.body.result.structuredContent.item_errors[0]
+      .modifier_groups.length,
+    2
+  );
+  assert.match(
+    response.body.result.structuredContent.item_errors[0].message,
+    /No cart changes were made/
+  );
+  assert.match(
+    response.body.result.structuredContent.item_errors[0].message,
+    /Imaginary Sauce.*does not match/
   );
 
   await mcpHandler.close();
@@ -438,6 +877,86 @@ test("add cart refuses to duplicate an active same-store cart", async () => {
   assert.deepEqual(
     calls.map((args) => args.slice(0, 2)),
     [["cart", "list"]]
+  );
+
+  await mcpHandler.close();
+  store.close();
+});
+
+test("add cart safely reuses an empty active same-store cart", async () => {
+  const store = new SecurityStore({ databasePath: ":memory:" });
+  const token = store.createToken({
+    name: "Open WebUI",
+    allowPurchases: false
+  });
+  const calls = [];
+  const { mcpHandler } = createTestApp({
+    securityStore: store,
+    runCli: async (args) => {
+      calls.push(args);
+      if (args[0] === "cart" && args[1] === "list") {
+        return cliResult({
+          carts: [
+            {
+              cart_uuid: "cart-empty",
+              store_id: "store-1",
+              items: []
+            }
+          ]
+        });
+      }
+      if (args[0] === "cart" && args[1] === "add-items") {
+        return cliResult({
+          cart_uuid: "cart-empty",
+          cart: {
+            id: "cart-empty",
+            items: [
+              {
+                id: "line-1",
+                item_id: "item-1",
+                name: "Item",
+                quantity: 1
+              }
+            ]
+          }
+        });
+      }
+      if (args[0] === "order" && args[1] === "checkout-url") {
+        return cliResult({
+          cart_uuid: "cart-empty",
+          checkout_url: "https://www.doordash.test/checkout/cart-empty"
+        });
+      }
+      throw new Error(`Unexpected CLI call: ${args.join(" ")}`);
+    }
+  });
+
+  const response = await mcpRequest(
+    mcpHandler,
+    authInfo(store, token.token),
+    "tools/call",
+    {
+      name: "add_cart_items",
+      arguments: {
+        storeId: "store-1",
+        menuId: "menu-1",
+        items: [
+          {
+            itemId: "item-1",
+            itemName: "Item"
+          }
+        ]
+      }
+    }
+  );
+
+  assert.equal(response.body.result.isError, undefined);
+  const addCall = calls.find(
+    (args) => args[0] === "cart" && args[1] === "add-items"
+  );
+  assert.equal(
+    addCall[addCall.indexOf("--cart-uuid") + 1],
+    "cart-empty"
   );
 
   await mcpHandler.close();

@@ -74,6 +74,8 @@ export const itemSchema = z.lazy(() =>
     price: moneySchema.optional(),
     original_price: moneySchema.optional(),
     available: optionalBoolean,
+    has_modifiers: optionalBoolean,
+    has_required_modifiers: optionalBoolean,
     purchase_type: optionalString,
     measurement_unit: optionalString,
     increment: optionalNumber,
@@ -756,6 +758,31 @@ function normalizeItem(value, { cartLine = false } = {}) {
         source.available,
         source.is_available,
         source.in_stock
+      )
+    ],
+    [
+      "has_modifiers",
+      booleanValue(
+        source.has_modifiers,
+        source.hasModifiers,
+        rawOptions?.length ? true : undefined
+      )
+    ],
+    [
+      "has_required_modifiers",
+      booleanValue(
+        source.has_required_modifiers,
+        source.hasRequiredModifiers,
+        Array.isArray(rawOptions)
+          ? rawOptions.some((group) => {
+              const minimum = numberValue(
+                group?.min_selections,
+                group?.min_num_options,
+                group?.min
+              );
+              return minimum > 0 || booleanValue(group?.required) === true;
+            })
+          : undefined
       )
     ],
     ["purchase_type", stringValue(source.purchase_type)],
