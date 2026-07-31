@@ -1,7 +1,4 @@
-import {
-  createMcpExpressApp,
-  requireBearerAuth
-} from "@modelcontextprotocol/express";
+import { requireBearerAuth } from "@modelcontextprotocol/express";
 import { toNodeHandler } from "@modelcontextprotocol/node";
 import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
 import express from "express";
@@ -10,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import * as z from "zod/v4";
 
 import { ActivityLog } from "./activity-log.js";
-import { createTokenVerifier, requireLoopback } from "./auth.js";
+import { createTokenVerifier } from "./auth.js";
 import {
   listPaymentMethodsArgs,
   orderStatusArgs,
@@ -220,9 +217,6 @@ function validateCardPayment(input, paymentMethods) {
 
 export function createDoorDashApp({
   securityStore,
-  host = "127.0.0.1",
-  allowedHosts,
-  allowedOrigins = allowedHosts,
   cliTimeoutMs = 120_000,
   runCli = runDoorDashCli,
   activityLog = new ActivityLog({ capacity: 100 }),
@@ -486,11 +480,8 @@ export function createDoorDashApp({
 
   const mcpHandler = createMcpHandler(createDoorDashServer);
   const nodeHandler = toNodeHandler(mcpHandler);
-  const app = createMcpExpressApp({
-    host,
-    allowedHosts,
-    allowedOrigins
-  });
+  const app = express();
+  app.use(express.json());
   const bearerAuth = requireBearerAuth({
     verifier: createTokenVerifier(securityStore),
     requiredScopes: ["doordash:tools"]
@@ -510,7 +501,6 @@ export function createDoorDashApp({
     void nodeHandler(req, res, req.body);
   });
 
-  app.use(requireLoopback);
   app.use((_req, res, next) => {
     res.set("Cache-Control", "no-store");
     next();
