@@ -7,7 +7,7 @@ const DEFAULT_CLI_PATH = path.resolve(SOURCE_DIR, "..", "dd-cli");
 const DEFAULT_TIMEOUT_MS = 120_000;
 const CLI_INTENT = "cli-usage";
 const MAX_ARGUMENTS = 64;
-const MAX_ARGUMENT_LENGTH = 4_096;
+const MAX_ARGUMENT_LENGTH = 256 * 1024;
 const MAX_OUTPUT_BYTES = 5 * 1024 * 1024;
 
 export class DoorDashCliError extends Error {
@@ -58,24 +58,6 @@ export function assertPurchaseAllowed(args, allowPurchases = false) {
   );
 }
 
-export function assertGenericCommandAllowed(args) {
-  if (args[0] === "payment-method") {
-    throw new DoorDashCliError(
-      "Payment methods are blocked in run. Use list_payment_methods with a purchase-enabled bearer token."
-    );
-  }
-
-  if (args[0] === "order" && args[1] === "submit") {
-    throw new DoorDashCliError(
-      "Order submission is blocked in run. Use order_submit with a purchase-enabled bearer token."
-    );
-  }
-
-  if (args.some((arg) => arg === "--help" || arg === "-h" || arg === "--version")) {
-    throw new DoorDashCliError("Help and version commands are not exposed through MCP.");
-  }
-}
-
 export function buildCliArguments(args) {
   return [
     "--json-output",
@@ -98,20 +80,45 @@ function parseOutput(stdout) {
   }
 }
 
-function errorMessageFromEnvelope(envelope) {
-  const structuredMessage =
-    envelope?.structuredContent?.error_message ||
-    envelope?.structuredContent?.message ||
-    envelope?.structuredContent?.error;
-  if (structuredMessage) {
-    return String(structuredMessage);
+function errorText(value) {
+  if (typeof value === "string" && value.trim()) {
+    return value.trim();
   }
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const code = value.code || value.error_reason;
+    const message = value.message || value.error_message;
+    if (code && message) {
+      return `${code}: ${message}`;
+    }
+    if (message) {
+      return String(message);
+    }
+    if (code) {
+      return String(code);
+    }
+  }
+  return undefined;
+}
 
+function errorMessageFromEnvelope(envelope) {
+  const structured = envelope?.structuredContent;
+  const structuredMessage =
+    errorText(structured?.error) ||
+    errorText(structured?.error_message) ||
+    errorText(structured?.message);
+  if (structuredMessage) {
+    return structuredMessage;
+  }
   const textContent = envelope?.content?.find((entry) => entry?.type === "text")?.text;
   if (textContent) {
     try {
       const parsed = JSON.parse(textContent);
-      return String(parsed.error_message || parsed.message || parsed.error || textContent);
+      return (
+        errorText(parsed.error) ||
+        errorText(parsed.error_message) ||
+        errorText(parsed.message) ||
+        textContent
+      );
     } catch {
       return textContent;
     }
@@ -212,7 +219,15 @@ export function runDoorDashCli(args, options = {}) {
           return;
         }
 
-        const message = stderr.trim() || stdout.trim() || `DoorDash CLI exited with code ${code}.`;
+        const parsedMessage =
+          result.data && typeof result.data === "object"
+            ? errorMessageFromEnvelope(result.data)
+            : undefined;
+        const message =
+          parsedMessage ||
+          stderr.trim() ||
+          stdout.trim() ||
+          `DoorDash CLI exited with code ${code}.`;
         reject(new DoorDashCliError(message, result));
       });
     });

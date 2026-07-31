@@ -13,7 +13,7 @@ import {
 
 const fixtures = new Map([
   [contracts.addresses, { addresses: [] }],
-  [contracts.addressUpdate, { success: true }],
+  [contracts.addressUpdate, { success: true, address_id: "address-1" }],
   [contracts.groceryList, { items: [] }],
   [contracts.itemSearch, { results: {} }],
   [contracts.storeSearch, { stores: [] }],
@@ -43,12 +43,24 @@ const fixtures = new Map([
     {
       success: true,
       cart_uuid: "cart-1",
+      mcp_preview_token: "preview-token",
+      mcp_preview_options: {
+        fulfillment: "delivery",
+        priority: false,
+        apply_credits: true
+      },
       quote: {
+        delivery_address: {
+          printable_address: "123 Main St"
+        },
         total_before_tip: {
           unit_amount: 1000,
           display_string: "$10.00"
         },
-        store_order_cart: { orders: [] }
+        store_order_cart: {
+          is_consumer_pickup: false,
+          orders: []
+        }
       }
     }
   ],
@@ -70,7 +82,10 @@ const fixtures = new Map([
   ],
   [contracts.orderStatus, { order_uuid: "order-1", status: "pending" }],
   [contracts.promotionList, { promos: [] }],
-  [contracts.promotionMutation, { success: true, cart_uuid: "cart-1" }],
+  [
+    contracts.promotionMutation,
+    { success: true, cart_uuid: "cart-1", promo_code: "SAVE" }
+  ],
   [contracts.paymentMethods, { cards: [] }],
   [
     contracts.orderSubmit,
@@ -114,6 +129,7 @@ test("every response contract validates its compact success response", () => {
     assert.equal(projected.schema, RESPONSE_SCHEMA);
     assert.equal(projected.version, RESPONSE_SCHEMA_VERSION);
     assert.equal(projected.kind, contract.kind);
+    assert.deepEqual(contract.successSchema.parse(projected), projected);
     assert.deepEqual(contract.outputSchema.parse(projected), projected);
 
     const result = toToolResult(projected);
@@ -135,6 +151,8 @@ test("errors are readable and include JSON for clients that ignore structuredCon
     assert.equal(failure.kind, contract.kind);
     assert.equal(Object.hasOwn(failure, "data"), false);
     assert.equal(failure.error.message, "Upstream exploded.");
+    assert.equal(failure.error.retryable, false);
+    assert.deepEqual(contract.outputSchema.parse(failure), failure);
 
     const result = toToolResult(failure);
     assert.equal(result.isError, true);
@@ -145,6 +163,69 @@ test("errors are readable and include JSON for clients that ignore structuredCon
     assert.equal(result.content[1].type, "text");
     assert.deepEqual(JSON.parse(result.content[1].text), failure);
   }
+});
+
+test("mutation errors are non-retryable unless a contract explicitly says otherwise", () => {
+  for (const contract of [
+    contracts.addressUpdate,
+    contracts.cartMutation,
+    contracts.promotionMutation,
+    contracts.reorder,
+    contracts.orderSubmit
+  ]) {
+    const failure = errorEnvelope(
+      contract,
+      new Error("Temporary upstream failure.")
+    );
+
+    assert.equal(failure.error.retryable, false);
+    assert.deepEqual(contract.outputSchema.parse(failure), failure);
+  }
+});
+
+test("warnings are visible in the first content block", () => {
+  const projected = projectWithContract(contracts.cart, {
+    success: true,
+    cart_uuid: "cart-1",
+    warning: "One item may have changed price.",
+    cart: {
+      id: "cart-1",
+      items: []
+    }
+  });
+
+  assert.deepEqual(projected.warnings, [
+    "One item may have changed price."
+  ]);
+  assert.match(
+    toToolResult(projected).content[0].text,
+    /One item may have changed price\./
+  );
+});
+
+test("recovery instructions contain executable tool arguments", () => {
+  const error = new Error("Another cart is already active.");
+  error.code = "ACTIVE_CART_EXISTS";
+  error.details = {
+    cart_uuid: "cart-9"
+  };
+
+  const failure = errorEnvelope(contracts.cart, error);
+
+  assert.deepEqual(failure.error, {
+    code: "ACTIVE_CART_EXISTS",
+    message: "Another cart is already active.",
+    retryable: false,
+    recovery_tool: "show_cart",
+    recovery_arguments: {
+      cart_uuid: "cart-9"
+    }
+  });
+  assert.deepEqual(contracts.cart.outputSchema.parse(failure), failure);
+  assert.match(
+    toToolResult(failure).content[0].text,
+    /Next: call show_cart once with \{"cart_uuid":"cart-9"\}\./
+  );
 });
 
 test("documented JSON responses parse and match their advertised contracts", async () => {
@@ -186,6 +267,7 @@ test("documented JSON responses parse and match their advertised contracts", asy
       assert.deepEqual(JSON.parse(example.content[1].text), structured);
       assert.equal(typeof structured.error.code, "string");
       assert.equal(typeof structured.error.message, "string");
+      assert.deepEqual(contract.outputSchema.parse(structured), structured);
       continue;
     }
 

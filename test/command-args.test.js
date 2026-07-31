@@ -123,6 +123,16 @@ test("builds nested additive cart arguments", () => {
   );
 });
 
+test("preserves an existing cart's fulfillment mode when add omits it", () => {
+  const args = addCartItemsArgs({
+    storeId: "store-1",
+    menuId: "menu-1",
+    items: [{ itemId: "item-1", itemName: "Ramen", quantity: 1 }]
+  });
+
+  assert.equal(args.includes("--fulfillment"), false);
+});
+
 test("keeps preview and submit pricing flags aligned", () => {
   const shared = {
     cartUuid: "cart-1",
@@ -158,4 +168,12 @@ test("keeps preview and submit pricing flags aligned", () => {
     "--priority",
     "--no-apply-credits"
   ]);
+  assert.deepEqual(
+    previewOrderArgs({
+      cartUuid: "cart-1",
+      priority: false,
+      applyCredits: true
+    }),
+    ["order", "preview", "--cart-uuid", "cart-1"]
+  );
 });

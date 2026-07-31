@@ -13,21 +13,20 @@ import {
   listOrdersArgs,
   listPaymentMethodsArgs,
   listPromosArgs,
-  menuArgs,
   orderStatusArgs,
-  previewOrderArgs,
   receiptArgs,
   removeCartItemArgs,
   removePromoArgs,
   reorderArgs,
-  restaurantItemDetailsArgs,
   searchRestaurantsArgs,
   setAddressArgs,
   showCartArgs,
   storeDetailsArgs
 } from "./command-args.js";
 import { hasPurchaseAccess } from "./auth.js";
-import { contractForTool, contracts } from "./response-contract.js";
+import {
+  publicOutputSchemaForTool
+} from "./response-contract.js";
 
 const idSchema = z.string().min(1).max(128);
 const fulfillmentSchema = z.enum(["delivery", "pickup"]);
@@ -40,7 +39,38 @@ const verticalSchema = z.enum([
   "nv"
 ]);
 
-const inputAliasPairs = [
+const legacyInputAliases = [
+  ["address_id", ["addressId"]],
+  ["store_id", ["storeId"]],
+  ["menu_id", ["menuId"]],
+  ["item_id", ["itemId"]],
+  ["cart_uuid", ["cartUuid"]],
+  ["cart_item_id", ["cartItemId"]],
+  ["order_uuid", ["orderUuid"]],
+  ["promo_code", ["promoCode"]],
+  ["campaign_id", ["campaignId"]],
+  ["ad_group_id", ["adGroupId"]],
+  ["ad_id", ["adId"]],
+  ["scheduled_time", ["scheduledTime"]],
+  ["budget_id", ["budgetId", "selected_budget_id", "selectedBudgetId"]],
+  ["team_id", ["teamId"]],
+  ["team_account_id", ["teamAccountId"]],
+  ["expense_code", ["expenseCode"]],
+  ["expense_notes", ["expenseNotes"]],
+  ["desired_merchant_name", ["desiredMerchantName"]],
+  ["include_work_benefits", ["includeWorkBenefits"]],
+  ["apply_credits", ["applyCredits"]],
+  ["group_cart", ["groupCart"]],
+  ["spend_limit", ["spendLimit"]],
+  ["expected_delivery_address", ["expectedDeliveryAddress"]],
+  ["preview_token", ["previewToken"]],
+  ["tip_confirmed", ["tipConfirmed"]],
+  ["payment_confirmation", ["paymentConfirmation"]],
+  ["pin_handoff_required", ["pinHandoffRequired"]],
+  ["pin_handoff_acknowledged", ["pinHandoffAcknowledged"]]
+];
+
+const internalInputNames = [
   ["address_id", "addressId"],
   ["store_id", "storeId"],
   ["menu_id", "menuId"],
@@ -53,100 +83,86 @@ const inputAliasPairs = [
   ["ad_group_id", "adGroupId"],
   ["ad_id", "adId"],
   ["scheduled_time", "scheduledTime"],
-  ["selected_budget_id", "selectedBudgetId"],
-  ["team_id", "teamId"],
   ["budget_id", "budgetId"],
+  ["team_id", "teamId"],
   ["team_account_id", "teamAccountId"],
   ["expense_code", "expenseCode"],
-  ["expense_notes", "expenseNotes"]
+  ["expense_notes", "expenseNotes"],
+  ["desired_merchant_name", "desiredMerchantName"],
+  ["include_work_benefits", "includeWorkBenefits"],
+  ["apply_credits", "applyCredits"],
+  ["group_cart", "groupCart"],
+  ["expected_delivery_address", "expectedDeliveryAddress"],
+  ["preview_token", "previewToken"],
+  ["tip_confirmed", "tipConfirmed"],
+  ["payment_confirmation", "paymentConfirmation"],
+  ["pin_handoff_required", "pinHandoffRequired"],
+  ["pin_handoff_acknowledged", "pinHandoffAcknowledged"]
 ];
 
-function aliasFields(
-  snakeName,
-  camelName,
-  schema = idSchema,
-  source = "a previous tool response"
-) {
-  return {
-    [snakeName]: schema
-      .optional()
-      .describe(`Preferred: copy ${snakeName} exactly from ${source}.`),
-    [camelName]: schema
-      .optional()
-      .describe(`Camel-case alias for ${snakeName}.`)
-  };
+function sameInputValue(left, right) {
+  return JSON.stringify(left) === JSON.stringify(right);
 }
 
-function aliasedObject(shape, {
-  required = [],
-  optional = []
-} = {}) {
-  const references = [...required, ...optional];
-  return z.object(shape).superRefine((value, context) => {
-    for (const [snakeName, camelName, label = snakeName] of references) {
-      const snakeValue = value[snakeName];
-      const camelValue = value[camelName];
+function canonicalObject(shape, extraAliases = []) {
+  const aliases = [...legacyInputAliases, ...extraAliases].filter(
+    ([canonicalName]) => Object.hasOwn(shape, canonicalName)
+  );
+  return z.preprocess((value, context) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return value;
+    }
+    const normalized = { ...value };
+    for (const [canonicalName, aliasNames] of aliases) {
+      const supplied = [
+        [canonicalName, normalized[canonicalName]],
+        ...aliasNames.map((aliasName) => [aliasName, normalized[aliasName]])
+      ].filter(([, aliasValue]) => aliasValue !== undefined);
       if (
-        snakeValue !== undefined &&
-        camelValue !== undefined &&
-        snakeValue !== camelValue
+        supplied.length > 1 &&
+        supplied.some(([, aliasValue]) =>
+          !sameInputValue(aliasValue, supplied[0][1])
+        )
       ) {
         context.addIssue({
           code: "custom",
-          path: [snakeName],
-          message: `${snakeName} and ${camelName} must match when both are provided.`
+          path: [canonicalName],
+          message: `${supplied.map(([name]) => name).join(", ")} must match when more than one is provided.`
         });
+        return z.NEVER;
       }
-      if (
-        required.some(
-          ([requiredSnake, requiredCamel]) =>
-            requiredSnake === snakeName && requiredCamel === camelName
-        ) &&
-        snakeValue === undefined &&
-        camelValue === undefined
-      ) {
-        context.addIssue({
-          code: "custom",
-          path: [snakeName],
-          message: `Provide ${snakeName} (preferred) or ${camelName} for ${label}.`
-        });
+      if (normalized[canonicalName] === undefined && supplied.length) {
+        normalized[canonicalName] = supplied[0][1];
+      }
+      for (const aliasName of aliasNames) {
+        delete normalized[aliasName];
       }
     }
-  });
-}
-
-function normalizeAliases(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return value;
-  }
-  const normalized = { ...value };
-  for (const [snakeName, camelName] of inputAliasPairs) {
-    if (
-      normalized[camelName] === undefined &&
-      normalized[snakeName] !== undefined
-    ) {
-      normalized[camelName] = normalized[snakeName];
-    }
-  }
-  return normalized;
+    return normalized;
+  }, z.strictObject(shape));
 }
 
 function normalizeToolInput(input) {
-  const normalized = normalizeAliases(input);
-  if (!normalized || typeof normalized !== "object") {
-    return normalized;
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return input;
+  }
+  const normalized = { ...input };
+  for (const [canonicalName, internalName] of internalInputNames) {
+    if (
+      normalized[internalName] === undefined &&
+      normalized[canonicalName] !== undefined
+    ) {
+      normalized[internalName] = normalized[canonicalName];
+    }
   }
   if (Array.isArray(normalized.items)) {
-    normalized.items = normalized.items.map((value) => {
-      const item = normalizeAliases(value);
-      item.itemName =
-        item.name ?? item.item_name ?? item.itemName;
-      item.requestedOptions =
-        item.requested_options ?? item.requestedOptions;
-      item.nestedOptions =
-        item.nested_options ?? item.nestedOptions;
-      return item;
-    });
+    normalized.items = normalized.items.map((value) => ({
+      ...value,
+      itemId: value.item_id,
+      itemName: value.name,
+      requestedOptions: value.requested_options,
+      nestedOptions: value.nested_options
+    }));
   }
   if (
     normalized.paymentConfirmation &&
@@ -156,252 +172,255 @@ function normalizeToolInput(input) {
       ...normalized.paymentConfirmation,
       budgetName:
         normalized.paymentConfirmation.budgetName ??
-        normalized.paymentConfirmation.budget_name ??
         normalized.paymentConfirmation.name
     };
   }
-  normalized.selectedBudgetId =
-    normalized.selectedBudgetId ??
-    normalized.selected_budget_id ??
-    normalized.budget_id ??
-    normalized.budgetId;
+  normalized.selectedBudgetId = normalized.budget_id;
+  if (normalized.expected_total_before_tip !== undefined) {
+    normalized.expectedTotalBeforeTipCents = Math.round(
+      normalized.expected_total_before_tip * 100
+    );
+  }
+  if (normalized.tip !== undefined) {
+    normalized.tipCents = Math.round(normalized.tip * 100);
+  }
+  if (normalized.spend_limit !== undefined) {
+    normalized.spendLimitCents = Math.round(normalized.spend_limit * 100);
+  }
   return normalized;
 }
 
-function selectedOptionId(option) {
-  return option.option_id || option.optionId || option.id;
-}
-
 const selectedCartOptionSchema = z.lazy(() =>
-  z
-    .object({
-      option_id: idSchema
-        .optional()
-        .describe(
-          "Preferred: copy option_id exactly from the chosen modifier option returned by get_menu, get_restaurant_item_details, or item_errors."
-        ),
-      optionId: idSchema
-        .optional()
-        .describe("Camel-case alias for option_id."),
-      id: idSchema
-        .optional()
-        .describe("Legacy alias for option_id."),
+  canonicalObject(
+    {
+      option_id: idSchema.describe(
+        "Copy option_id exactly from the chosen option returned by an item-details call or item_errors."
+      ),
       name: z
         .string()
         .min(1)
         .max(500)
         .optional()
-        .describe(
-          "The selected option name. Optional; when omitted, the wrapper uses the option ID."
-        ),
+        .describe("Optional option name copied from the same response."),
       quantity: z.number().int().min(1).default(1),
       options: z
         .array(selectedCartOptionSchema)
         .max(50)
         .optional()
         .describe(
-          "Only for a selected option that itself exposes nested modifier groups: include the selected child options here."
+          "Child selections only when this option exposes nested modifier_groups."
         )
-    })
-    .refine((option) => Boolean(selectedOptionId(option)), {
-      message:
-        "Each nested_options entry requires option_id (preferred), optionId, or id."
-    })
-    .refine((option) => !selectedOptionId(option)?.startsWith("e_"), {
-      message:
-        "nested_options entries must be selected option IDs, not modifier-group IDs such as e_...."
-    })
+    },
+    [["option_id", ["optionId", "id"]]]
+  ).refine((option) => !option.option_id.startsWith("e_"), {
+    message:
+      "option_id must identify a selectable option, not a modifier group such as e_...."
+  })
 );
 
-const cartItemSchema = aliasedObject({
-  ...aliasFields(
-    "item_id",
-    "itemId",
-    idSchema,
-    "get_menu, get_item_details, find_items, or list_orders"
-  ),
-  itemName: z
-    .string()
-    .min(1)
-    .max(500)
-    .optional()
-    .describe(
-      "Camel-case item-name alias. Prefer name from the menu response."
+const cartItemSchema = canonicalObject(
+  {
+    item_id: idSchema.describe(
+      "Copy item_id exactly from a menu, item-details, item-search, or order response."
     ),
-  item_name: z
-    .string()
-    .min(1)
-    .max(500)
-    .optional()
-    .describe("Snake-case alias for name."),
-  name: z
-    .string()
-    .min(1)
-    .max(500)
-    .optional()
-    .describe("Preferred when copying an item from a tool response."),
-  quantity: z.number().positive().max(10_000).default(1),
-  requestedOptions: z
-    .array(z.string().min(1).max(300))
-    .max(50)
-    .optional()
-    .describe(
-      "Camel-case alias for requested_options."
-    ),
-  requested_options: z
-    .array(z.string().min(1).max(300))
-    .max(50)
-    .optional()
-    .describe(
-      "Current option names explicitly requested for this line, such as Sweet Corn, Rotisserie Chicken, or Utensils. The server resolves them before changing the cart and rejects unmatched choices."
-    ),
-  nestedOptions: z
-    .array(selectedCartOptionSchema)
-    .max(100)
-    .optional()
-    .describe(
-      "Camel-case alias for nested_options."
-    ),
-  nested_options: z
-    .array(selectedCartOptionSchema)
-    .max(100)
-    .optional()
-    .describe(
-      "Selected options only. Copy option_id and name from each chosen option. Include enough entries to satisfy every modifier group whose min_selections is greater than zero. Keep ordinary selections in this top-level list; never include group_id or extra_id nodes."
-    )
-}, {
-  required: [["item_id", "itemId", "item ID"]]
-}).superRefine((item, context) => {
-  if (!item.itemName && !item.item_name && !item.name) {
-    context.addIssue({
-      code: "custom",
-      path: ["name"],
-      message: "Provide name (preferred), item_name, or itemName."
-    });
-  }
-  const names = [item.name, item.item_name, item.itemName].filter(
-    (entry) => entry !== undefined
-  );
-  if (new Set(names).size > 1) {
-    context.addIssue({
-      code: "custom",
-      path: ["name"],
-      message:
-        "name, item_name, and itemName must match when more than one is provided."
-    });
-  }
-  for (const [snakeName, camelName] of [
-    ["requested_options", "requestedOptions"],
-    ["nested_options", "nestedOptions"]
-  ]) {
-    if (
-      item[snakeName] !== undefined &&
-      item[camelName] !== undefined &&
-      JSON.stringify(item[snakeName]) !== JSON.stringify(item[camelName])
-    ) {
-      context.addIssue({
-        code: "custom",
-        path: [snakeName],
-        message: `${snakeName} and ${camelName} must match when both are provided.`
-      });
-    }
-  }
-});
-
-const previewOptionsSchema = {
-  ...aliasFields(
-    "scheduled_time",
-    "scheduledTime",
-    z.string().datetime({ offset: true }),
-    "preview_order or an earlier scheduling choice"
-  ),
-  fulfillment: fulfillmentSchema.optional(),
-  priority: z.boolean().default(false),
-  includeWorkBenefits: z.boolean().default(false),
-  ...aliasFields(
-    "selected_budget_id",
-    "selectedBudgetId",
-    idSchema,
-    "preview_order work_benefits.eligible_budgets"
-  ),
-  ...aliasFields(
-    "budget_id",
-    "budgetId",
-    idSchema,
-    "preview_order work_benefits.eligible_budgets"
-  ),
-  applyCredits: z.boolean().default(true)
-};
-
-const promoInputSchema = {
-  ...aliasFields("cart_uuid", "cartUuid", idSchema, "show_cart or list_carts"),
-  ...aliasFields(
-    "promo_code",
-    "promoCode",
-    z.string().min(1).max(200),
-    "list_promos"
-  ),
-  ...aliasFields("campaign_id", "campaignId", idSchema, "list_promos"),
-  ...aliasFields("ad_group_id", "adGroupId", idSchema, "list_promos"),
-  ...aliasFields("ad_id", "adId", idSchema, "list_promos")
-};
-
-const workBudgetConfirmationSchema = z
-  .object({
-    type: z.literal("work_budget"),
     name: z
       .string()
       .min(1)
-      .max(300)
+      .max(500)
+      .describe("Copy the menu item's exact name. Choices do not belong here."),
+    quantity: z.number().int().min(1).max(10_000).default(1),
+    requested_options: z
+      .array(z.string().min(1).max(300))
+      .max(50)
       .optional()
       .describe(
-        "Preferred: copy name from preview_order work_benefits.eligible_budgets."
+        "Restaurant choices for this line. Use an exact option name, or a Yes/No group name such as Utensils to select Yes. Omit an optional add-on to decline it; use No only when item details return a No option."
       ),
-    ...aliasFields(
-      "budget_name",
-      "budgetName",
-      z.string().min(1).max(300),
-      "preview_order or the user's confirmation"
+    nested_options: z
+      .array(selectedCartOptionSchema)
+      .max(100)
+      .optional()
+      .describe(
+        "Exact selected option_id objects. Include every required group; never send group_id or extra_id."
+      )
+  },
+  [
+    ["name", ["item_name", "itemName"]],
+    ["requested_options", ["requestedOptions"]],
+    ["nested_options", ["nestedOptions"]]
+  ]
+);
+
+const previewOptionsSchema = {
+  scheduled_time: z.string().datetime({ offset: true }).optional(),
+  fulfillment: fulfillmentSchema
+    .optional()
+    .describe(
+      "Optional. Omit to preserve the cart's current mode; passing delivery or pickup changes it."
+    ),
+  priority: z.boolean().default(false),
+  include_work_benefits: z
+    .boolean()
+    .default(true)
+    .describe("Keep true to return any eligible work budgets."),
+  budget_id: idSchema
+    .optional()
+    .describe(
+      "Work payment uses two previews: first omit budget_id to list eligible budgets, then call preview_order again with the chosen budget_id."
+    ),
+  apply_credits: z.boolean().default(true)
+};
+
+const promoInputSchema = {
+  cart_uuid: idSchema.describe("Copy cart_uuid from a cart response."),
+  promo_code: z
+    .string()
+    .min(1)
+    .max(200)
+    .describe("Copy promo_code from list_promos or the user."),
+  campaign_id: idSchema
+    .optional()
+    .describe("Copy campaign_id from the same list_promos entry."),
+  ad_group_id: idSchema
+    .optional()
+    .describe("Copy ad_group_id from the same list_promos entry."),
+  ad_id: idSchema
+    .optional()
+    .describe("Copy ad_id from the same list_promos entry.")
+};
+
+const workBudgetConfirmationSchema = z.strictObject({
+  type: z.literal("work_budget"),
+  name: z
+    .string()
+    .min(1)
+    .max(300)
+    .describe(
+      "Copy name from preview_order work_benefits.eligible_budgets."
     )
-  })
-  .superRefine((value, context) => {
-    const names = [value.name, value.budget_name, value.budgetName].filter(
-      (entry) => entry !== undefined
-    );
-    if (names.length === 0) {
+});
+
+function orderSubmitInputSchema(shape) {
+  return z.preprocess((value, context) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return value;
+    }
+    const normalized = { ...value };
+    const paymentValues = [
+      ["payment_confirmation", normalized.payment_confirmation],
+      ["paymentConfirmation", normalized.paymentConfirmation]
+    ].filter(([, paymentValue]) => paymentValue !== undefined);
+    if (
+      paymentValues.length > 1 &&
+      !sameInputValue(paymentValues[0][1], paymentValues[1][1])
+    ) {
       context.addIssue({
         code: "custom",
-        path: ["name"],
+        path: ["payment_confirmation"],
         message:
-          "Provide name (preferred), budget_name, or budgetName for the work budget."
+          "payment_confirmation and paymentConfirmation must match when both are provided."
       });
+      return z.NEVER;
     }
-    if (new Set(names).size > 1) {
-      context.addIssue({
-        code: "custom",
-        path: ["name"],
-        message:
-          "name, budget_name, and budgetName must match when more than one is provided."
-      });
+    if (paymentValues.length) {
+      const payment = { ...paymentValues[0][1] };
+      if (payment.type === "work_budget") {
+        const names = [
+          ["name", payment.name],
+          ["budget_name", payment.budget_name],
+          ["budgetName", payment.budgetName]
+        ].filter(([, nameValue]) => nameValue !== undefined);
+        if (
+          names.length > 1 &&
+          names.some(([, nameValue]) => nameValue !== names[0][1])
+        ) {
+          context.addIssue({
+            code: "custom",
+            path: ["payment_confirmation", "name"],
+            message:
+              "name, budget_name, and budgetName must match when more than one is provided."
+          });
+          return z.NEVER;
+        }
+        payment.name = names[0]?.[1];
+        delete payment.budget_name;
+        delete payment.budgetName;
+      }
+      normalized.payment_confirmation = payment;
+      delete normalized.paymentConfirmation;
     }
-  });
+    for (const [canonicalName, legacyName] of [
+      ["expected_total_before_tip", "expectedTotalBeforeTipCents"],
+      ["tip", "tipCents"]
+    ]) {
+      const legacyCents = normalized[legacyName];
+      if (legacyCents === undefined) {
+        continue;
+      }
+      const legacyDollars = Number(legacyCents) / 100;
+      if (
+        normalized[canonicalName] !== undefined &&
+        normalized[canonicalName] !== legacyDollars
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: [canonicalName],
+          message: `${canonicalName} and ${legacyName} must represent the same amount.`
+        });
+        return z.NEVER;
+      }
+      normalized[canonicalName] = legacyDollars;
+      delete normalized[legacyName];
+    }
+    return normalized;
+  }, canonicalObject(shape));
+}
+
+function cartInputSchema(shape) {
+  return z.preprocess((value, context) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return value;
+    }
+    const normalized = { ...value };
+    const legacyValues = [
+      ["spend_limit_cents", normalized.spend_limit_cents],
+      ["spendLimitCents", normalized.spendLimitCents]
+    ].filter(([, legacyValue]) => legacyValue !== undefined);
+    if (legacyValues.length) {
+      const legacyDollars = Number(legacyValues[0][1]) / 100;
+      if (
+        legacyValues.some(([, legacyValue]) =>
+          Number(legacyValue) / 100 !== legacyDollars
+        ) ||
+        (normalized.spend_limit !== undefined &&
+          normalized.spend_limit !== legacyDollars)
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: ["spend_limit"],
+          message:
+            "spend_limit and legacy spend-limit fields must represent the same amount."
+        });
+        return z.NEVER;
+      }
+      normalized.spend_limit = legacyDollars;
+    }
+    delete normalized.spend_limit_cents;
+    delete normalized.spendLimitCents;
+    return normalized;
+  }, canonicalObject(shape));
+}
 
 function orderReferenceSchema() {
-  return aliasedObject(
-    aliasFields(
-      "order_uuid",
-      "orderUuid",
-      idSchema,
-      "list_orders or order_submit"
-    ),
-    {
-      required: [["order_uuid", "orderUuid", "order"]]
-    }
-  );
+  return canonicalObject({
+    order_uuid: idSchema.describe(
+      "Copy order_uuid exactly from list_orders or order_submit."
+    )
+  });
 }
 
 function orderUuidFromInput(input) {
-  return input.order_uuid || input.orderUuid;
+  return input.order_uuid;
 }
 
 function annotations({
@@ -422,7 +441,7 @@ function register(server, name, config, handler) {
     name,
     {
       ...config,
-      outputSchema: contractForTool(name).outputSchema
+      outputSchema: publicOutputSchemaForTool(name)
     },
     (input, ...args) => handler(normalizeToolInput(input), ...args)
   );
@@ -436,7 +455,7 @@ export function registerDoorDashTools(server, context) {
       title: "List DoorDash Addresses",
       description:
         "List saved delivery addresses and identify the account-wide default. Address data is sensitive.",
-      inputSchema: z.object({}),
+      inputSchema: canonicalObject({}),
       annotations: annotations({ readOnly: true })
     },
     async () => context.invoke(listAddressesArgs())
@@ -448,27 +467,34 @@ export function registerDoorDashTools(server, context) {
     {
       title: "Set Default DoorDash Address",
       description:
-        "Change the DoorDash account-wide default address using address_id from list_addresses. This affects the app, website, searches, previews, and future checkout links; there is no per-cart address override.",
-      inputSchema: aliasedObject(
-        {
-          ...aliasFields(
-            "address_id",
-            "addressId",
-            idSchema,
-            "list_addresses"
-          ),
-          confirmation: z.literal("SET DEFAULT ADDRESS")
-        },
-        {
-          required: [["address_id", "addressId", "address"]]
-        }
-      ),
+        "Set the account-wide default address. Copy address_id from list_addresses and use the exact confirmation text. This changes searches, previews, and future DoorDash checkouts.",
+      inputSchema: canonicalObject({
+        address_id: idSchema.describe("Copy address_id from list_addresses."),
+        confirmation: z.literal("SET DEFAULT ADDRESS")
+      }),
       annotations: annotations({
         readOnly: false,
         idempotent: true
       })
     },
-    async (input) => context.invoke(setAddressArgs(input))
+    async (input) =>
+      context.invoke(setAddressArgs(input), {
+        transform: (data) => ({
+          ...data,
+          address_id: data?.address_id || input.addressId
+        }),
+        stateMutation: {
+          operation: "set_default_address",
+          stateScope: "address"
+        },
+        mutationOutcome: {
+          code: "ADDRESS_MUTATION_OUTCOME_UNKNOWN",
+          message:
+            "DoorDash did not confirm whether the default address changed. Do not repeat the update. Call list_addresses once and inspect is_default.",
+          addressId: input.addressId,
+          stateScope: "address"
+        }
+      })
   );
 
   register(
@@ -478,26 +504,21 @@ export function registerDoorDashTools(server, context) {
       title: "Build DoorDash Grocery List",
       description:
         "Resolve a complete grocery or household shopping list into products. This is stateless and does not create a cart.",
-      inputSchema: aliasedObject({
+      inputSchema: canonicalObject({
         items: z
           .array(
-            z.object({
+            z.strictObject({
               name: z.string().min(1).max(300),
               quantity: z.number().positive().max(10_000).optional()
             })
           )
           .min(1)
           .max(20),
-        ...aliasFields(
-          "store_id",
-          "storeId",
-          idSchema,
-          "find_nearby_stores or a previous grocery result"
-        ),
-        desiredMerchantName: z.string().min(1).max(300).optional(),
+        store_id: idSchema
+          .optional()
+          .describe("Optional store_id from find_nearby_stores."),
+        desired_merchant_name: z.string().min(1).max(300).optional(),
         servings: z.number().int().min(1).max(1_000).optional()
-      }, {
-        optional: [["store_id", "storeId", "store"]]
       }),
       annotations: annotations({ readOnly: true })
     },
@@ -511,16 +532,11 @@ export function registerDoorDashTools(server, context) {
       title: "Find DoorDash Store Items",
       description:
         "Search for one or more grocery or retail products inside a specific store. Results are capped to keep catalog payloads usable.",
-      inputSchema: aliasedObject({
-        ...aliasFields(
-          "store_id",
-          "storeId",
-          idSchema,
-          "find_nearby_stores or build_grocery_list"
+      inputSchema: canonicalObject({
+        store_id: idSchema.describe(
+          "Copy store_id from find_nearby_stores or build_grocery_list."
         ),
         queries: z.array(z.string().min(1).max(300)).min(1).max(10)
-      }, {
-        required: [["store_id", "storeId", "store"]]
       }),
       annotations: annotations({ readOnly: true })
     },
@@ -533,8 +549,8 @@ export function registerDoorDashTools(server, context) {
     {
       title: "Find Nearby DoorDash Stores",
       description:
-        "Discover grocery, retail, convenience, pet, alcohol, or NV stores using the account-wide default saved DoorDash address. This tool always resolves that address through list_addresses and does not accept a location override.",
-      inputSchema: z.object({
+        "Discover non-restaurant stores using the account-wide default address. Choose grocery, alcohol, convenience, pets, or retail; nv means all non-restaurant types. Location overrides are not accepted.",
+      inputSchema: canonicalObject({
         vertical: verticalSchema,
         max: z.number().int().min(1).max(100).default(25)
       }),
@@ -550,32 +566,17 @@ export function registerDoorDashTools(server, context) {
     {
       title: "Get DoorDash Item Details",
       description:
-        "Return current item pricing and options. Item IDs prefixed i_ are restaurant menu items and automatically use restaurant modifier lookup; other IDs use grocery or retail lookup. For restaurant items, menu_id is optional because the server can resolve it.",
-      inputSchema: aliasedObject({
-        ...aliasFields(
-          "store_id",
-          "storeId",
-          idSchema,
-          "search, menu, or item-search results"
+        "Return current pricing and selectable option_id values. IDs prefixed i_ use restaurant modifiers; other IDs use grocery or retail lookup. Restaurant menu_id is optional because the server can resolve it.",
+      inputSchema: canonicalObject({
+        store_id: idSchema.describe(
+          "Copy store_id from the search, menu, or item-search result."
         ),
-        ...aliasFields(
-          "item_id",
-          "itemId",
-          idSchema,
-          "get_menu, find_items, or list_orders"
+        item_id: idSchema.describe(
+          "Copy item_id from get_menu, find_items, or list_orders."
         ),
-        ...aliasFields(
-          "menu_id",
-          "menuId",
-          idSchema,
-          "get_menu or build_grocery_list"
-        )
-      }, {
-        required: [
-          ["store_id", "storeId", "store"],
-          ["item_id", "itemId", "item"]
-        ],
-        optional: [["menu_id", "menuId", "menu"]]
+        menu_id: idSchema
+          .optional()
+          .describe("Optional menu_id copied from get_menu.")
       }),
       annotations: annotations({ readOnly: true })
     },
@@ -588,43 +589,21 @@ export function registerDoorDashTools(server, context) {
     {
       title: "Get DoorDash Restaurant Menu",
       description:
-        "Return a restaurant menu and menu ID. Items with has_modifiers require get_item_details or get_restaurant_item_details before adding so optional add-ons are not lost and every required group is satisfied.",
-      inputSchema: aliasedObject({
-        ...aliasFields(
-          "store_id",
-          "storeId",
-          idSchema,
-          "search_restaurants or get_store_details"
-        )
-      }, {
-        required: [["store_id", "storeId", "store"]]
+        "Return a restaurant menu and menu_id. Set query to the requested dish name to keep the result small. You can call add_cart_items directly with requested_options; use get_item_details only to inspect choices.",
+      inputSchema: canonicalObject({
+        store_id: idSchema.describe(
+          "Copy store_id from search_restaurants or get_store_details."
+        ),
+        query: z
+          .string()
+          .min(1)
+          .max(300)
+          .optional()
+          .describe("Optional dish-name filter, such as Spicy TanTan.")
       }),
       annotations: annotations({ readOnly: true })
     },
-    async (input) => context.invoke(menuArgs(input))
-  );
-
-  register(
-    server,
-    "get_restaurant_item_details",
-    {
-      title: "Get DoorDash Restaurant Item Modifiers",
-      description:
-        "RESTAURANT ITEMS ONLY. Return pricing and every recursive modifier choice, including optional add-ons. Modifier groups describe constraints and must not be sent as cart selections. For add_cart_items, send chosen option_id nodes or plain-language requested_options and satisfy every group whose min_selections is greater than zero.",
-      inputSchema: aliasedObject({
-        ...aliasFields("store_id", "storeId", idSchema, "get_menu"),
-        ...aliasFields("menu_id", "menuId", idSchema, "get_menu"),
-        ...aliasFields("item_id", "itemId", idSchema, "get_menu")
-      }, {
-        required: [
-          ["store_id", "storeId", "store"],
-          ["menu_id", "menuId", "menu"],
-          ["item_id", "itemId", "item"]
-        ]
-      }),
-      annotations: annotations({ readOnly: true })
-    },
-    async (input) => context.invoke(restaurantItemDetailsArgs(input))
+    async (input) => context.getMenu(input)
   );
 
   register(
@@ -634,7 +613,7 @@ export function registerDoorDashTools(server, context) {
       title: "Search DoorDash Restaurants",
       description:
         "Find nearby restaurants using the account-wide default saved DoorDash address. This tool always resolves that address through list_addresses and does not accept a location override.",
-      inputSchema: z.object({
+      inputSchema: canonicalObject({
         query: z.string().min(1).max(500),
         limit: z.number().int().min(1).max(50).default(10)
       }),
@@ -650,16 +629,11 @@ export function registerDoorDashTools(server, context) {
     {
       title: "Get DoorDash Store Details",
       description:
-        "Return store identity, business metadata, physical location, and fulfillment capabilities.",
-      inputSchema: aliasedObject({
-        ...aliasFields(
-          "store_id",
-          "storeId",
-          idSchema,
-          "search_restaurants or find_nearby_stores"
+        "Return store metadata, address, and fulfillment capabilities.",
+      inputSchema: canonicalObject({
+        store_id: idSchema.describe(
+          "Copy store_id from search_restaurants or find_nearby_stores."
         )
-      }, {
-        required: [["store_id", "storeId", "store"]]
       }),
       annotations: annotations({ readOnly: true })
     },
@@ -672,79 +646,47 @@ export function registerDoorDashTools(server, context) {
     {
       title: "Add DoorDash Cart Items",
       description:
-        "Send every requested line together in one call; never add one item at a time. Copy store_id, menu_id, item_id, and name directly from menu tools. The server preflights all i_-prefixed restaurant items and every modifier group before making one DoorDash cart write, resolves requested_options such as Sweet Corn, and returns all modifier groups without changing the cart when a required choice is missing. Name labels do not customize items. You may instead copy exact selected option_id entries as nested_options: [{\"option_id\":\"o_...\",\"name\":\"Chosen option\"}]; include every group whose min_selections is greater than zero, never pass group_id or extra_id nodes such as e_..., and recurse only when a selected option exposes nested groups. After success, the tool automatically returns checkout_url. Delivery uses the account-wide default address. Quantities are additive and this is not idempotent. With no cart_uuid, an empty same-store cart is safely reused; a nonempty cart returns ACTIVE_CART_EXISTS so it cannot be duplicated.",
-      inputSchema: z
-        .object({
-          ...aliasFields("store_id", "storeId", idSchema, "get_menu"),
-          ...aliasFields("menu_id", "menuId", idSchema, "get_menu"),
+        "Add the complete requested batch once. Copy store_id, menu_id, item_id, and exact item name. Put choices in requested_options or nested_options; satisfy every required modifier group. When extending cart_uuid, omit fulfillment to preserve its mode or copy show_cart.fulfillment. A preflight error makes no cart change; fix all lines, then retry once. A partial-add result may have written items; never resend. Success normally returns checkout_url.",
+      inputSchema: cartInputSchema({
+          store_id: idSchema.describe(
+            "Copy store_id from get_menu, build_grocery_list, or get_item_details."
+          ),
+          menu_id: idSchema.describe(
+            "Copy menu_id from get_menu or build_grocery_list. For a retail search result, call get_item_details first."
+          ),
           items: z
             .array(cartItemSchema)
             .min(1)
-            .max(100)
+            .max(20)
             .describe(
-              "The complete batch of every requested cart line. Put differently customized copies on separate lines; use quantity only for truly identical copies."
+              "Every requested cart line, up to 20. Use separate lines for different options; quantity is only for identical copies."
             ),
-          ...aliasFields(
-            "cart_uuid",
-            "cartUuid",
-            idSchema,
-            "show_cart or list_carts"
-          ),
-          fulfillment: fulfillmentSchema.default("delivery"),
-          groupCart: z.boolean().default(false),
-          spendLimitCents: z
-            .number()
-            .int()
-            .min(1)
-            .max(2_147_483_647)
+          cart_uuid: idSchema
             .optional()
-        })
-        .superRefine((value, context) => {
-          for (const [snakeName, camelName, label] of [
-            ["store_id", "storeId", "store"],
-            ["menu_id", "menuId", "menu"]
-          ]) {
-            if (!value[snakeName] && !value[camelName]) {
-              context.addIssue({
-                code: "custom",
-                path: [snakeName],
-                message: `Provide ${snakeName} (preferred) or ${camelName} for ${label}.`
-              });
-            }
-            if (
-              value[snakeName] &&
-              value[camelName] &&
-              value[snakeName] !== value[camelName]
-            ) {
-              context.addIssue({
-                code: "custom",
-                path: [snakeName],
-                message: `${snakeName} and ${camelName} must match when both are provided.`
-              });
-            }
-          }
-          if (
-            value.cart_uuid &&
-            value.cartUuid &&
-            value.cart_uuid !== value.cartUuid
-          ) {
-            context.addIssue({
-              code: "custom",
-              path: ["cart_uuid"],
-              message:
-                "cart_uuid and cartUuid must match when both are provided."
-            });
-          }
+            .describe("Only to extend a cart already inspected with show_cart."),
+          fulfillment: fulfillmentSchema
+            .optional()
+            .describe(
+              "Optional. Omit to preserve an existing cart's mode; pass delivery or pickup only when explicitly chosen."
+            ),
+          group_cart: z.boolean().default(false),
+          spend_limit: z
+            .number()
+            .min(0.01)
+            .max(21_474_836.47)
+            .multipleOf(0.01)
+            .describe(
+              "Per-person group-cart limit in dollars. Requires group_cart=true and no cart_uuid."
+            )
+            .optional()
         })
         .refine(
           (value) =>
-            value.spendLimitCents === undefined ||
-            (value.groupCart &&
-              value.cartUuid === undefined &&
-              value.cart_uuid === undefined),
+            value.spend_limit === undefined ||
+            (value.group_cart && value.cart_uuid === undefined),
           {
             message:
-              "spendLimitCents requires a new group cart and cannot be used with cartUuid."
+              "spend_limit requires group_cart=true and cannot extend an existing cart_uuid."
           }
         ),
       annotations: annotations({
@@ -761,16 +703,12 @@ export function registerDoorDashTools(server, context) {
     {
       title: "Delete DoorDash Cart",
       description:
-        "Empty and abandon an open cart using cart_uuid from list_carts or show_cart. Start a fresh cart after deletion.",
-      inputSchema: aliasedObject({
-        ...aliasFields(
-          "cart_uuid",
-          "cartUuid",
-          idSchema,
-          "list_carts or show_cart"
-        )
-      }, {
-        required: [["cart_uuid", "cartUuid", "cart"]]
+        "Permanently empty an open cart only after the user explicitly chooses replacement. Copy cart_uuid from show_cart and use the exact confirmation text.",
+      inputSchema: canonicalObject({
+        cart_uuid: idSchema.describe(
+          "Copy cart_uuid from list_carts or show_cart."
+        ),
+        confirmation: z.literal("DELETE CART")
       }),
       annotations: annotations({
         readOnly: false,
@@ -778,7 +716,25 @@ export function registerDoorDashTools(server, context) {
         idempotent: false
       })
     },
-    async (input) => context.invoke(deleteCartArgs(input))
+    async (input) =>
+      context.invoke(deleteCartArgs(input), {
+        transform: (data) => ({
+          ...data,
+          cart_uuid: data?.cart_uuid || input.cartUuid
+        }),
+        stateMutation: {
+          operation: "delete_cart",
+          cartUuid: input.cartUuid,
+          stateScope: "cart"
+        },
+        mutationOutcome: {
+          code: "CART_MUTATION_OUTCOME_UNKNOWN",
+          message:
+            "DoorDash did not confirm whether the cart was deleted. Do not call delete_cart again. Call show_cart once with this cart_uuid; a not-found result confirms deletion.",
+          cartUuid: input.cartUuid,
+          stateScope: "cart"
+        }
+      })
   );
 
   register(
@@ -787,16 +743,9 @@ export function registerDoorDashTools(server, context) {
     {
       title: "List DoorDash Carts",
       description:
-        "List active unsubmitted carts, optionally filtered by store. Use this before additive cart mutations.",
-      inputSchema: aliasedObject({
-        ...aliasFields(
-          "store_id",
-          "storeId",
-          idSchema,
-          "search_restaurants, find_nearby_stores, or get_menu"
-        )
-      }, {
-        optional: [["store_id", "storeId", "store"]]
+        "List up to 25 active unsubmitted carts and 10 lines per cart, optionally filtered by store. add_cart_items checks automatically; use this only to inspect or recover, then call show_cart for one cart's expanded detail.",
+      inputSchema: canonicalObject({
+        store_id: idSchema.optional().describe("Optional store_id filter.")
       }),
       annotations: annotations({ readOnly: true })
     },
@@ -810,19 +759,11 @@ export function registerDoorDashTools(server, context) {
       title: "Remove DoorDash Cart Item",
       description:
         "Remove one complete cart line. Copy cart_uuid and items[].cart_item_id from show_cart; cart_item_id is not the menu item ID.",
-      inputSchema: aliasedObject({
-        ...aliasFields("cart_uuid", "cartUuid", idSchema, "show_cart"),
-        ...aliasFields(
-          "cart_item_id",
-          "cartItemId",
-          idSchema,
-          "show_cart items"
+      inputSchema: canonicalObject({
+        cart_uuid: idSchema.describe("Copy cart_uuid from show_cart."),
+        cart_item_id: idSchema.describe(
+          "Copy items[].cart_item_id from show_cart."
         )
-      }, {
-        required: [
-          ["cart_uuid", "cartUuid", "cart"],
-          ["cart_item_id", "cartItemId", "cart line"]
-        ]
       }),
       annotations: annotations({
         readOnly: false,
@@ -830,7 +771,25 @@ export function registerDoorDashTools(server, context) {
         idempotent: false
       })
     },
-    async (input) => context.invoke(removeCartItemArgs(input))
+    async (input) =>
+      context.invoke(removeCartItemArgs(input), {
+        transform: (data) => ({
+          ...data,
+          cart_uuid: data?.cart_uuid || input.cartUuid
+        }),
+        stateMutation: {
+          operation: "remove_cart_item",
+          cartUuid: input.cartUuid,
+          stateScope: "cart"
+        },
+        mutationOutcome: {
+          code: "CART_MUTATION_OUTCOME_UNKNOWN",
+          message:
+            "DoorDash did not confirm whether the cart line was removed. Do not call remove_cart_item again. Call show_cart once and compare cart_item_id values.",
+          cartUuid: input.cartUuid,
+          stateScope: "cart"
+        }
+      })
   );
 
   register(
@@ -839,16 +798,11 @@ export function registerDoorDashTools(server, context) {
     {
       title: "Show DoorDash Cart",
       description:
-        "Return cart contents and cart-line IDs using cart_uuid from list_carts, reorder, or add_cart_items. This does not return authoritative pricing or delivery address; use preview for those.",
-      inputSchema: aliasedObject({
-        ...aliasFields(
-          "cart_uuid",
-          "cartUuid",
-          idSchema,
-          "list_carts, reorder, or add_cart_items"
+        "Return up to 100 cart lines and any cart-line IDs DoorDash supplied, using cart_uuid from list_carts, reorder, or add_cart_items. Check warnings and items_truncation; never substitute item_id for a missing cart_item_id. Use preview_order for authoritative pricing and address.",
+      inputSchema: canonicalObject({
+        cart_uuid: idSchema.describe(
+          "Copy cart_uuid from list_carts, reorder, or add_cart_items."
         )
-      }, {
-        required: [["cart_uuid", "cartUuid", "cart"]]
       }),
       annotations: annotations({ readOnly: true })
     },
@@ -862,15 +816,10 @@ export function registerDoorDashTools(server, context) {
       title: "Create DoorDash Checkout Link",
       description:
         "Create a browser checkout URL from cart_uuid without submitting or charging. The URL does not pin an address; DoorDash uses the account-wide default at checkout.",
-      inputSchema: aliasedObject({
-        ...aliasFields(
-          "cart_uuid",
-          "cartUuid",
-          idSchema,
-          "show_cart, list_carts, reorder, or add_cart_items"
+      inputSchema: canonicalObject({
+        cart_uuid: idSchema.describe(
+          "Copy cart_uuid from a cart response."
         )
-      }, {
-        required: [["cart_uuid", "cartUuid", "cart"]]
       }),
       annotations: annotations({ readOnly: true })
     },
@@ -883,9 +832,9 @@ export function registerDoorDashTools(server, context) {
     {
       title: "List DoorDash Orders",
       description:
-        "Return recent order history. Large 365-day/100-order requests may fail upstream; use narrower windows when needed.",
-      inputSchema: z.object({
-        max: z.number().int().min(1).max(100).default(50),
+        "Return up to 25 recent orders with 10 item lines each. Use items_truncation and get_receipt for one order's detail.",
+      inputSchema: canonicalObject({
+        max: z.number().int().min(1).max(25).default(10),
         days: z.number().int().min(0).max(365).default(90)
       }),
       annotations: annotations({ readOnly: true })
@@ -899,47 +848,17 @@ export function registerDoorDashTools(server, context) {
     {
       title: "Preview DoorDash Order",
       description:
-        "Return authoritative items, pricing, total, delivery address, ETA, tip suggestions, credits, and work budgets for cart_uuid. Delivery uses the account-wide default DoorDash address. Passing fulfillment changes cart mode.",
-      inputSchema: aliasedObject(
-        {
-          ...aliasFields(
-            "cart_uuid",
-            "cartUuid",
-            idSchema,
-            "show_cart, list_carts, reorder, or add_cart_items"
-          ),
+        "Return authoritative cart contents, pricing, address, ETA, tips, and work budgets. Before order_submit, show the user these values and copy submit_context exactly. Passing fulfillment changes the cart mode.",
+      inputSchema: canonicalObject({
+          cart_uuid: idSchema.describe("Copy cart_uuid from a cart response."),
           ...previewOptionsSchema
-        },
-        {
-          required: [["cart_uuid", "cartUuid", "cart"]],
-          optional: [
-            ["scheduled_time", "scheduledTime", "schedule"],
-            ["selected_budget_id", "selectedBudgetId", "work budget"],
-            ["budget_id", "budgetId", "work budget"]
-          ]
-        }
-      ).superRefine((value, context) => {
-        const budgetIds = [
-          value.selected_budget_id,
-          value.selectedBudgetId,
-          value.budget_id,
-          value.budgetId
-        ].filter((entry) => entry !== undefined);
-        if (new Set(budgetIds).size > 1) {
-          context.addIssue({
-            code: "custom",
-            path: ["budget_id"],
-            message:
-              "budget_id, budgetId, selected_budget_id, and selectedBudgetId must match when more than one is provided."
-          });
-        }
       }),
       annotations: annotations({
         readOnly: false,
         idempotent: true
       })
     },
-    async (input) => context.invoke(previewOrderArgs(input))
+    async (input) => context.previewOrder(input)
   );
 
   register(
@@ -964,7 +883,7 @@ export function registerDoorDashTools(server, context) {
     {
       title: "Reorder DoorDash Order",
       description:
-        "Create a new cart from a past order using order_uuid from list_orders. Compare the new cart with history because unavailable items can be silently dropped.",
+        "Create one new cart from a past order using order_uuid from list_orders. Success requires a new cart_uuid. Compare it with history because unavailable items can be dropped; never repeat reorder after an unknown outcome.",
       inputSchema: orderReferenceSchema(),
       annotations: annotations({
         readOnly: false,
@@ -973,7 +892,19 @@ export function registerDoorDashTools(server, context) {
     },
     async (input) =>
       context.invoke(
-        reorderArgs({ orderUuid: orderUuidFromInput(input) })
+        reorderArgs({ orderUuid: orderUuidFromInput(input) }),
+        {
+          stateMutation: {
+            operation: "reorder",
+            stateScope: "carts"
+          },
+          mutationOutcome: {
+            code: "REORDER_OUTCOME_UNKNOWN",
+            message:
+              "DoorDash did not confirm the new reorder cart_uuid. Never reorder this order again blindly. Call list_carts once and inspect the newest cart.",
+            stateScope: "carts"
+          }
+        }
       )
   );
 
@@ -983,7 +914,7 @@ export function registerDoorDashTools(server, context) {
     {
       title: "Check DoorDash Order Status",
       description:
-        "Check whether a submitted order is pending, successful, action required, failed, or not found. Copy order_uuid exactly from list_orders or order_submit; orderUuid remains accepted as an alias.",
+        "Check once whether a submitted order is pending, successful, action required, failed, or not found. Copy order_uuid from list_orders or order_submit. If it is still pending, report that state; do not poll repeatedly in one request.",
       inputSchema: orderReferenceSchema(),
       annotations: annotations({ readOnly: true })
     },
@@ -1000,15 +931,10 @@ export function registerDoorDashTools(server, context) {
       title: "List DoorDash Promotions",
       description:
         "List consumer- and store-specific campaign promotions eligible at store_id.",
-      inputSchema: aliasedObject({
-        ...aliasFields(
-          "store_id",
-          "storeId",
-          idSchema,
-          "search_restaurants, find_nearby_stores, or get_menu"
+      inputSchema: canonicalObject({
+        store_id: idSchema.describe(
+          "Copy store_id from a store, menu, or search result."
         )
-      }, {
-        required: [["store_id", "storeId", "store"]]
       }),
       annotations: annotations({ readOnly: true })
     },
@@ -1022,23 +948,32 @@ export function registerDoorDashTools(server, context) {
       title: "Apply DoorDash Promotion",
       description:
         "Apply a typed or campaign promo to cart_uuid. Copy promo_code and campaign identifiers directly from list_promos.",
-      inputSchema: aliasedObject(promoInputSchema, {
-        required: [
-          ["cart_uuid", "cartUuid", "cart"],
-          ["promo_code", "promoCode", "promotion"]
-        ],
-        optional: [
-          ["campaign_id", "campaignId", "campaign"],
-          ["ad_group_id", "adGroupId", "ad group"],
-          ["ad_id", "adId", "advertisement"]
-        ]
-      }),
+      inputSchema: canonicalObject(promoInputSchema),
       annotations: annotations({
         readOnly: false,
         idempotent: false
       })
     },
-    async (input) => context.invoke(applyPromoArgs(input))
+    async (input) =>
+      context.invoke(applyPromoArgs(input), {
+        transform: (data) => ({
+          ...data,
+          cart_uuid: data?.cart_uuid || input.cartUuid,
+          promo_code: data?.promo_code || input.promoCode
+        }),
+        stateMutation: {
+          operation: "apply_promo",
+          cartUuid: input.cartUuid,
+          stateScope: "cart"
+        },
+        mutationOutcome: {
+          code: "PROMO_MUTATION_OUTCOME_UNKNOWN",
+          message:
+            "DoorDash did not confirm whether the promo was applied. Do not apply it again. Create the checkout link once and verify the promotion in DoorDash checkout.",
+          cartUuid: input.cartUuid,
+          stateScope: "cart"
+        }
+      })
   );
 
   register(
@@ -1048,24 +983,33 @@ export function registerDoorDashTools(server, context) {
       title: "Remove DoorDash Promotion",
       description:
         "Remove a promo using the same promo_code and campaign IDs returned by list_promos and used when it was applied.",
-      inputSchema: aliasedObject(promoInputSchema, {
-        required: [
-          ["cart_uuid", "cartUuid", "cart"],
-          ["promo_code", "promoCode", "promotion"]
-        ],
-        optional: [
-          ["campaign_id", "campaignId", "campaign"],
-          ["ad_group_id", "adGroupId", "ad group"],
-          ["ad_id", "adId", "advertisement"]
-        ]
-      }),
+      inputSchema: canonicalObject(promoInputSchema),
       annotations: annotations({
         readOnly: false,
         destructive: true,
         idempotent: false
       })
     },
-    async (input) => context.invoke(removePromoArgs(input))
+    async (input) =>
+      context.invoke(removePromoArgs(input), {
+        transform: (data) => ({
+          ...data,
+          cart_uuid: data?.cart_uuid || input.cartUuid,
+          promo_code: data?.promo_code || input.promoCode
+        }),
+        stateMutation: {
+          operation: "remove_promo",
+          cartUuid: input.cartUuid,
+          stateScope: "cart"
+        },
+        mutationOutcome: {
+          code: "PROMO_MUTATION_OUTCOME_UNKNOWN",
+          message:
+            "DoorDash did not confirm whether the promo was removed. Do not remove it again. Create the checkout link once and verify the promotion in DoorDash checkout.",
+          cartUuid: input.cartUuid,
+          stateScope: "cart"
+        }
+      })
   );
 
   if (hasPurchaseAccess(context.authInfo)) {
@@ -1076,7 +1020,7 @@ export function registerDoorDashTools(server, context) {
         title: "List DoorDash Payment Cards",
         description:
           "List masked saved cards: brand, last four, expiry, and default status. Wallets and full card numbers are not available.",
-        inputSchema: z.object({}),
+        inputSchema: canonicalObject({}),
         annotations: annotations({ readOnly: true })
       },
       async () =>
@@ -1091,80 +1035,106 @@ export function registerDoorDashTools(server, context) {
       {
         title: "Submit DoorDash Order",
         description:
-          "DANGEROUS: re-preview and then place cart_uuid using the account-wide default delivery address and charging the confirmed default payment method or work budget. Copy work-benefit IDs from preview_order. Never retry the same cart.",
-        inputSchema: aliasedObject({
-          ...aliasFields(
-            "cart_uuid",
-            "cartUuid",
-            idSchema,
-            "preview_order"
-          ),
-          expectedTotalBeforeTipCents: z.number().int().min(0),
-          expectedDeliveryAddress: z.string().min(5).max(1_000),
-          tipCents: z.number().int().min(0).max(1_000_000),
-          tipConfirmed: z.literal(true),
-          paymentConfirmation: z.union([
-            z.object({
+          "Place one confirmed cart. Call preview_order and copy every submit_context field, including preview_token. For a personal card, also call list_payment_methods and copy brand/last4 from the is_default card after user confirmation. expected_total_before_tip and tip are dollars. Never call this twice for one cart.",
+        inputSchema: orderSubmitInputSchema({
+          cart_uuid: idSchema.describe("Copy cart_uuid from preview_order."),
+          preview_token: z
+            .string()
+            .regex(
+              /^[A-Za-z0-9_-]{43}\.[A-Za-z0-9_-]{43}$/,
+              "Copy preview_token exactly from preview_order submit_context."
+            )
+            .describe(
+              "Copy submit_context.preview_token exactly. It binds the confirmed cart contents, total, address, fulfillment, schedule, priority, credits, PIN requirement, and selected work budget."
+            ),
+          expected_total_before_tip: z
+            .number()
+            .min(0)
+            .multipleOf(0.01)
+            .describe(
+              "Copy submit_context.expected_total_before_tip from preview_order."
+            ),
+          expected_delivery_address: z
+            .union([z.string().min(5).max(1_000), z.null()])
+            .describe(
+              "Copy submit_context.expected_delivery_address exactly. It is null for pickup when DoorDash returns no delivery address."
+            ),
+          tip: z
+            .number()
+            .min(0)
+            .max(10_000)
+            .multipleOf(0.01)
+            .describe(
+              "Confirmed tip in dollars. Copy a tip_suggestions[].amount or use the user's explicit amount."
+            ),
+          tip_confirmed: z.literal(true),
+          payment_confirmation: z.union([
+            z.strictObject({
               type: z.literal("card"),
               brand: z.string().min(1).max(80),
               last4: z.string().regex(/^\d{4}$/)
             }),
-            z.object({
+            z.strictObject({
               type: z.literal("account_default"),
               acknowledgement: z.literal("USE ACCOUNT DEFAULT")
-            }),
+            }).describe(
+              "Only after list_payment_methods cannot identify the default, browser checkout was offered, and the user explicitly accepts that unseen default."
+            ),
             workBudgetConfirmationSchema
           ]),
           confirmation: z.literal("PLACE ORDER"),
-          ...aliasFields(
-            "scheduled_time",
-            "scheduledTime",
-            z.string().datetime({ offset: true }),
-            "preview_order or an earlier scheduling choice"
+          scheduled_time: z
+            .string()
+            .datetime({ offset: true })
+            .optional()
+            .describe("Copy submit_context.scheduled_time when present."),
+          fulfillment: fulfillmentSchema.describe(
+            "Copy submit_context.fulfillment."
           ),
-          fulfillment: fulfillmentSchema.optional(),
-          priority: z.boolean().default(false),
-          applyCredits: z.boolean().default(true),
-          ...aliasFields(
-            "team_id",
-            "teamId",
-            idSchema,
-            "preview_order work_benefits"
-          ),
-          ...aliasFields(
-            "budget_id",
-            "budgetId",
-            idSchema,
-            "preview_order eligible_budgets"
-          ),
-          ...aliasFields(
-            "team_account_id",
-            "teamAccountId",
-            idSchema,
-            "preview_order eligible_budgets"
-          ),
-          ...aliasFields(
-            "expense_code",
-            "expenseCode",
-            z.string().min(1).max(500),
-            "the user's work-expense choice"
-          ),
-          ...aliasFields(
-            "expense_notes",
-            "expenseNotes",
-            z.string().min(1).max(2_000),
-            "the user's work-expense choice"
-          )
-        }, {
-          required: [["cart_uuid", "cartUuid", "cart"]],
-          optional: [
-            ["scheduled_time", "scheduledTime", "schedule"],
-            ["team_id", "teamId", "work-benefits team"],
-            ["budget_id", "budgetId", "work budget"],
-            ["team_account_id", "teamAccountId", "team account"],
-            ["expense_code", "expenseCode", "expense code"],
-            ["expense_notes", "expenseNotes", "expense notes"]
-          ]
+          priority: z
+            .boolean()
+            .describe("Copy submit_context.priority."),
+          apply_credits: z
+            .boolean()
+            .describe("Copy submit_context.apply_credits."),
+          pin_handoff_required: z
+            .boolean()
+            .describe("Copy submit_context.pin_handoff_required."),
+          pin_handoff_acknowledged: z
+            .literal(true)
+            .optional()
+            .describe(
+              "Required only when submit_context.pin_handoff_required is true, after the user accepts handing the delivery PIN to the Dasher."
+            ),
+          team_id: idSchema
+            .optional()
+            .describe("Copy work_benefits.team_id from preview_order."),
+          budget_id: idSchema
+            .optional()
+            .describe(
+              "For work payment, call preview_order with the chosen budget_id, then copy submit_context.budget_id."
+            ),
+          team_account_id: idSchema
+            .optional()
+            .describe(
+              "Copy team_account_id from the same eligible budget."
+            ),
+          expense_code: z
+            .string()
+            .min(1)
+            .max(500)
+            .optional()
+            .describe(
+              "Required when the selected budget has expense_code_mode \"required\"; ask the user for the value."
+            ),
+          expense_notes: z
+            .string()
+            .min(1)
+            .max(2_000)
+            .optional()
+            .describe(
+              "Required when the selected budget has expense_note_required true; ask the user for the note."
+            )
         }),
         annotations: annotations({
           readOnly: false,
@@ -1176,56 +1146,4 @@ export function registerDoorDashTools(server, context) {
     );
   }
 
-  register(
-    server,
-    "activity",
-    {
-      title: "DoorDash Activity",
-      description:
-        "Return recent MCP-routed DoorDash CLI calls and complete unredacted results, newest first.",
-      inputSchema: z.object({
-        limit: z.number().int().min(1).max(100).default(20)
-      }),
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false
-      }
-    },
-    async ({ limit }) =>
-      context.toolResult(
-        {
-          count: context.activityLog.size,
-          entries: context.activityLog.list(limit)
-        },
-        contracts.activity
-      )
-  );
-
-  register(
-    server,
-    "run",
-    {
-      title: "Run Safe DoorDash CLI Command",
-      description:
-        "Debug fallback for future CLI commands without typed tools. Login, help, version, payment methods, and order submission are permanently blocked here.",
-      inputSchema: z.object({
-        args: z
-          .array(z.string().min(1).max(4_096))
-          .min(1)
-          .max(64)
-      }),
-      annotations: annotations({
-        readOnly: false,
-        destructive: true,
-        idempotent: false
-      })
-    },
-    async ({ args }) =>
-      context.invoke(args, {
-        contract: contracts.rawCli,
-        generic: true
-      })
-  );
 }

@@ -82,3 +82,26 @@ test("returns stderr and exit metadata on failure", async () => {
       error.details.exitCode === 7
   );
 });
+
+test("renders structured CLI errors instead of object stringification", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "dd-cli-mcp-"));
+  const mockCli = path.join(directory, "mock-dd-cli");
+  await writeFile(
+    mockCli,
+    "#!/bin/sh\nprintf '%s\\n' '{\"isError\":true,\"structuredContent\":{\"error\":{\"code\":\"BAD_OPTION\",\"message\":\"Choose a size.\"}}}'\nexit 9\n",
+    "utf8"
+  );
+  await chmod(mockCli, 0o755);
+
+  await assert.rejects(
+    runDoorDashCli(["cart", "add-items"], {
+      cliPath: mockCli,
+      timeoutMs: 5_000
+    }),
+    (error) =>
+      error instanceof DoorDashCliError &&
+      error.message === "BAD_OPTION: Choose a size." &&
+      !error.message.includes("[object Object]") &&
+      error.details.exitCode === 9
+  );
+});

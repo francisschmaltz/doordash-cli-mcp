@@ -370,6 +370,22 @@ test("submit recognizes a nested terminal order status at app level", async () =
   });
 
   try {
+    const previewResponse = await mcpRequest(
+      mcpHandler,
+      auth,
+      "tools/call",
+      {
+        name: "preview_order",
+        arguments: {
+          cart_uuid: "cart-1",
+          fulfillment: "delivery",
+          priority: false,
+          apply_credits: true
+        }
+      }
+    );
+    const previewToken =
+      previewResponse.result.structuredContent.submit_context.preview_token;
     const response = await mcpRequest(
       mcpHandler,
       auth,
@@ -378,6 +394,7 @@ test("submit recognizes a nested terminal order status at app level", async () =
         name: "order_submit",
         arguments: {
           cartUuid: "cart-1",
+          previewToken,
           expectedTotalBeforeTipCents: 2500,
           expectedDeliveryAddress:
             "21 Bay Forest Dr, Oakland, CA 94611",
@@ -389,8 +406,10 @@ test("submit recognizes a nested terminal order status at app level", async () =
             last4: "4242"
           },
           confirmation: "PLACE ORDER",
+          fulfillment: "delivery",
           priority: false,
-          applyCredits: true
+          applyCredits: true,
+          pinHandoffRequired: false
         }
       }
     );

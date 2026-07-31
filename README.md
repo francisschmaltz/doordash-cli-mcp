@@ -3,7 +3,7 @@
 Local Streamable HTTP MCP wrapper for DoorDash CLI. It lets an MCP client use
 DoorDash through the macOS CLI and the credentials in the user's Keychain.
 
-The server exposes every authenticated service command in DoorDash CLI v0.2.1.
+The server exposes the authenticated ordering services in DoorDash CLI v0.2.1.
 `login`, help, and version remain local CLI operations.
 
 ## Setup
@@ -97,9 +97,11 @@ does not expose provider/payment IDs.
 
 `order_submit` is deliberately obnoxious:
 
-- It requires the previously confirmed total and delivery address.
-- It requires an explicit tip, including an explicit zero.
+- It requires the exact `submit_context` returned by `preview_order`.
+- It requires an explicit tip in dollars, including an explicit zero.
 - It requires the confirmed default card, account default, or work budget.
+- It requires explicit PIN-handoff acknowledgement when the preview says a
+  delivery PIN is required.
 - It re-previews immediately before submission and stops on drift.
 - It records the cart before spawning the purchase command.
 - It never retries a cart with any recorded submission attempt.
@@ -110,24 +112,43 @@ confirmation contract is still mandatory.
 
 ## MCP tools
 
-Every typed tool advertises an MCP `outputSchema`. Calls return a readable
-result plus the same machine payload through both client-compatible channels:
+Every tool advertises an MCP `outputSchema` with a success/error union. Calls
+return a readable result plus the same machine payload through both
+client-compatible channels:
 
 - `content[0].text` is a short readable summary.
 - `content[1].text` is minified JSON, exactly equal to
   `JSON.stringify(structuredContent)`.
 - `structuredContent` is the stable, versioned machine result.
 
-Errors also return the JSON text copy and `isError: true`. This keeps recovery
-details visible to MCP clients that ignore `structuredContent`. Cart preflight
-errors put missing choices in the readable text and tell callers not to repeat
-unchanged input.
+The advertised output schemas are intentionally shallow: they name the fields
+needed for the next tool without repeating the full response grammar 25 times.
+Every actual response is still checked against the strict internal contract
+before it is returned.
 
-Tool-to-tool handoffs use the response field names directly. Snake-case fields
-such as `address_id`, `store_id`, `menu_id`, `item_id`, `cart_uuid`,
-`cart_item_id`, `order_uuid`, `budget_id`, and promotion IDs are the preferred
-inputs everywhere they are consumed. Existing camel-case inputs remain aliases.
-If both forms are sent, they must match.
+Typed errors also return the JSON text copy and `isError: true`.
+`structuredContent.error` contains a stable code, `retryable: false`, and,
+when recovery is possible, the exact `recovery_tool` and
+`recovery_arguments`. Do not repeat the failed call; perform the one stated
+recovery action instead.
+
+State-changing tools are serialized inside the service. A cart, promo, address,
+preview, reorder, or submission cannot slip between purchase revalidation and
+the purchase command. If a non-idempotent command loses its upstream result,
+the error names one inspection tool; it never tells the caller to repeat the
+write.
+
+Cart preflight failures are the one deliberate exception: they return the
+`cart` shape with `items: []`, complete `item_errors`, and `isError: true`.
+That means no cart write occurred. A DoorDash partial-add response instead has
+both successful `items` and `item_errors`; those successful lines are already
+in the cart and must never be sent again.
+
+The public `tools/list` schemas use strict snake_case fields. Copy response
+fields such as `address_id`, `store_id`, `menu_id`, `item_id`, `cart_uuid`,
+`cart_item_id`, `order_uuid`, and `budget_id` directly into the next tool.
+Unknown fields are rejected. Older camelCase and cents-based inputs remain
+runtime compatibility aliases, but new callers should not use them.
 
 The contract stays compact. Money is a floating-point dollar number rounded to
 two decimals. An ETA is one `delivery_time` string, including a range such as
@@ -135,10 +156,9 @@ two decimals. An ETA is one `delivery_time` string, including a range such as
 provides them. Unavailable optional fields are omitted. Checkout, tracking, and
 group-cart links appear only when DoorDash supplied them.
 
-Typed tools discard unknown CLI fields instead of leaking the upstream payload.
-See [MCP response examples](docs/mcp-response-examples.md) for complete wire
-examples. `run` remains a generic `raw_cli` escape hatch; its result is
-not a stable typed contract.
+Typed tools discard unknown CLI response fields instead of leaking the upstream
+payload. See [MCP response examples](docs/mcp-response-examples.md) for complete
+wire examples.
 
 ### Addresses
 
@@ -155,7 +175,6 @@ and submissions use the account-wide default address.
 - `find_nearby_stores`
 - `get_store_details`
 - `get_menu`
-- `get_restaurant_item_details`
 - `find_items`
 - `get_item_details`
 - `build_grocery_list`
@@ -165,9 +184,14 @@ use the coordinates of the account-wide default address. They do not accept a
 location override. The wrapper returns an error instead of guessing when
 DoorDash has no marked default or the default has no coordinates.
 
-`get_item_details` automatically routes `i_`-prefixed menu IDs through the
-restaurant modifier endpoint and can resolve an omitted `menu_id`. Other item
-IDs continue to use grocery or retail details.
+Use `get_menu` with its optional `query` field to filter a restaurant menu to
+the requested dish name. `get_item_details` automatically routes `i_`-prefixed
+item IDs through the restaurant modifier endpoint and can resolve an omitted
+`menu_id`. Other item IDs use grocery or retail details.
+Without `query`, `get_menu` returns at most 50 items and tells the caller to
+retry with the dish name when more were omitted.
+A zero-match query says not to repeat it unchanged: try one broader dish name
+or inspect the capped menu once without a query.
 
 ### Carts
 
@@ -177,37 +201,72 @@ IDs continue to use grocery or retail details.
 - `remove_cart_item`
 - `delete_cart`
 
-The add operation is additive and non-idempotent. Send all requested lines in
-one call. Before making one DoorDash cart write, the wrapper fetches current
-details for every `i_`-prefixed restaurant item and validates the full batch.
-If a required choice is unresolved, it returns every modifier group and makes
-no cart changes. A required group with only one available choice is selected
-automatically; preferences with multiple choices are never guessed.
+The add operation is additive and non-idempotent. Send the complete requested
+batch once. Every line requires the exact menu `item_id` and exact menu `name`;
+names are labels, not customization. Before one DoorDash cart write, the
+wrapper fetches current details for every `i_`-prefixed restaurant item and
+validates the full batch. A required group with one possible choice is selected
+automatically. A preference with multiple choices is never guessed.
 
-Plain-language choices may be sent per line in `requested_options`, such as
-`["Rotisserie Chicken", "Sweet Corn", "Utensils"]`. They are resolved against
-the current modifier tree, and any unmatched choice blocks the entire batch. A
-customized `name` such as `Spicy TanTan with Sweet Corn` is also recognized
-for compatibility, then normalized back to the real menu name. Prefer
-`requested_options`; `name` itself does not customize an item.
+Put requested choices per line in `requested_options`, using exact current
+option names. A group name can select its unambiguous Yes option, and
+`"No <group>"` can select its returned No option. Omit an optional add-on to
+decline it; never invent a `"No ..."` option. An unmatched, ambiguous, or
+unreachable nested choice blocks the full batch. Use `get_item_details` when
+the available choices are not already known. Menu results omit modifier trees;
+item details returns them only for the selected item. Missing option IDs or a
+tree over 25 groups, 100 options, or five levels fails closed before any cart
+write.
 
 Exact choices may instead be copied into `nested_options` as
-`{"option_id":"o_...","name":"Chosen option"}`; `optionId` and legacy `id`
-remain accepted aliases. Do not pass modifier group IDs such as `e_...`.
-Ordinary selections stay flat, while `options` is only for choices that expose
-another nested modifier group.
+`{"option_id":"o_...","name":"Chosen option"}`. Do not pass modifier group IDs
+such as `e_...`.
+Ordinary selections stay flat. If a selected option exposes another modifier
+group, put the child selections in that option's `options` array.
+
+If preflight returns `items: []` plus `item_errors`, no cart change occurred.
+Resolve every reported line from the user's stated choices, or ask the user.
+Then retry the complete batch once. Never repeat unchanged input.
+An unavailable item explicitly says not to retry; choose another item or use
+DoorDash checkout.
+Cart errors include full modifier choices for at most two distinct items; each
+remaining line says to call `get_item_details` for that `item_id`.
+
+If DoorDash instead returns successful `items` plus `item_errors`, the update
+was partial. Call `show_cart`, then add only the failed lines using the returned
+`cart_uuid`. Resending an added line or the full original batch duplicates it.
+When DoorDash reports an error for repeated copies of the same item but omits
+the modifier variant, the error has `ambiguous: true` and lists every candidate
+request line with its selected options. Inspect the cart and add only a variant
+confirmed missing; never guess which candidate failed.
 
 After a successful add, `add_cart_items` automatically creates and returns a
 browser `checkout_url`. If DoorDash adds the items but link creation fails, the
 tool preserves the cart result and tells the caller to use
 `create_checkout_link`.
 
+One `add_cart_items` call accepts at most 20 complete request lines and checks
+at most four distinct item-detail records concurrently.
+
 When `cart_uuid` is omitted, the wrapper checks for an active cart at that store
 before adding. An empty cart left by an earlier failed add is reused
 automatically. A nonempty cart returns `ACTIVE_CART_EXISTS` with
-`recovery_tool: show_cart` instead of silently duplicating items. Inspect it,
-then return its checkout link when it already matches, explicitly extend it
-using its `cart_uuid`, or delete and replace it.
+`recovery_tool: show_cart` and its exact `cart_uuid` instead of silently
+duplicating items. Inspect it, then return its checkout link when it already
+matches, explicitly extend it using its `cart_uuid`, or ask whether to replace
+it. `delete_cart` requires the exact confirmation `"DELETE CART"` after the
+user chooses replacement.
+
+When extending a `cart_uuid`, omit `fulfillment` to preserve its current mode,
+or copy `show_cart.fulfillment` when the user explicitly chose delivery or
+pickup.
+
+`list_carts` returns at most 25 carts and 10 lines per cart; call `show_cart`
+for one cart's detail. Cart detail and add results return at most 100 lines.
+`items_truncation` states exactly how many lines were omitted.
+
+Group-cart `spend_limit` is a dollar amount with at most two decimal places. It
+requires `group_cart: true` and cannot be used while extending `cart_uuid`.
 
 ### Orders
 
@@ -219,8 +278,54 @@ using its `cart_uuid`, or delete and replace it.
 - `order_status`
 - `order_submit` — permission-gated
 
+`list_orders` returns at most 25 orders with 10 item lines each and marks
+omitted lines with `items_truncation`; call `get_receipt` for one order's
+itemized detail.
+`reorder` is accepted only when DoorDash returns the new `cart_uuid`.
+
 Preview supports scheduled orders, delivery/pickup, Priority delivery, credit
-opt-out, and work-benefit budgets.
+opt-out, and work-benefit budgets. It returns an exact `submit_context`:
+
+Omit `fulfillment` to preserve the cart's current delivery/pickup mode. Passing
+`delivery` or `pickup` explicitly changes that mode.
+
+```json
+{
+  "cart_uuid": "cart-123",
+  "preview_token": "bHy-Nx9_OVxS4mVXGF8TF08f-HmEiEvPl-9mM9pHUaQ.sxoJtkJslOz0zqrsIs4uuss1vX8cPgTWuvHCAScEilk",
+  "expected_total_before_tip": 25.01,
+  "expected_delivery_address": "123 Main St, Oakland, CA 94611",
+  "fulfillment": "delivery",
+  "priority": false,
+  "apply_credits": true,
+  "pin_handoff_required": false
+}
+```
+
+`preview_token` binds the confirmed cart contents, every setting returned in
+`submit_context`, and the selected work budget's identity, rules, and remaining
+balance. Changing any of that requires a new preview; tip, payment confirmation,
+and expense details are added afterward.
+
+Copy `cart_uuid`, `preview_token`, `expected_total_before_tip`,
+`expected_delivery_address`, `fulfillment`, `priority`, `apply_credits`, and
+`pin_handoff_required` from `submit_context`; also copy `scheduled_time` when
+present. Add the user's confirmed `tip` in dollars, `tip_confirmed: true`,
+payment confirmation, and `confirmation: "PLACE ORDER"`. For pickup, copy
+`expected_delivery_address: null` when the preview returns no delivery address.
+
+When `pin_handoff_required` is true, ask the user to accept handing the
+delivery PIN to the Dasher, then add `pin_handoff_acknowledged: true`. For a
+work budget, call `preview_order` again with the selected `budget_id`, then
+copy `work_benefits.team_id` and that budget's `budget_id`, `name`, and
+optional `team_account_id`; use
+`payment_confirmation: {"type":"work_budget","name":"..."}` and include any
+required expense code or notes. For a personal card, call
+`list_payment_methods` and copy `brand` and `last4` from the `is_default` card
+after the user confirms it.
+Use `account_default` only when that call cannot identify the default, browser
+checkout was offered, and the user explicitly accepts the unseen account
+default.
 
 ### Payments and promotions
 
@@ -228,15 +333,6 @@ opt-out, and work-benefit budgets.
 - `list_promos`
 - `apply_promo`
 - `remove_promo`
-
-### Server utilities
-
-- `activity`
-- `run`
-
-`run` is a compatibility escape hatch for future safe CLI commands.
-It permanently blocks login, help, version, payment methods, and order
-submission. Sensitive operations must use their typed tools.
 
 Every CLI invocation automatically uses root `--json-output` and appends:
 
@@ -269,11 +365,11 @@ ledger:
 The directory is ignored by Git. DoorDash owns carts and orders; the macOS
 Keychain owns CLI credentials.
 
-The dashboard and `activity` keep the last 100 MCP-routed CLI calls in memory.
+The dashboard keeps the last 100 MCP-routed CLI calls in memory.
 Commands and CLI results are stored raw and completely unredacted, including
 coordinates, addresses, URLs, payment metadata, and error details. Anyone with
-dashboard or MCP `activity` access can read them. The log resets on restart.
-Direct terminal calls do not appear.
+admin dashboard or raw activity-log access can read them. The log resets on
+restart. Direct terminal calls do not appear.
 
 Authenticated raw activity JSON:
 

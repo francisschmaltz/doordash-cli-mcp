@@ -33,8 +33,9 @@ const truncationSchema = z.object({
 
 const selectedOptionSchema = z.lazy(() =>
   z.object({
-    name: optionalString,
-    value: optionalString,
+    option_id: optionalString,
+    group_name: optionalString,
+    option_name: optionalString,
     quantity: optionalNumber,
     price: moneySchema.optional(),
     options: z.array(selectedOptionSchema).optional()
@@ -43,7 +44,7 @@ const selectedOptionSchema = z.lazy(() =>
 
 const modifierOptionSchema = z.lazy(() =>
   z.object({
-    option_id: optionalString,
+    option_id: z.string(),
     name: optionalString,
     price: moneySchema.optional(),
     available: optionalBoolean,
@@ -123,6 +124,8 @@ const cartFields = {
   cart_uuid: optionalString,
   store: storeSchema.optional(),
   items: z.array(itemSchema),
+  added_line_count: optionalNumber,
+  items_truncation: truncationSchema.optional(),
   fulfillment: z.enum(["delivery", "pickup"]).optional(),
   created_at: optionalString,
   updated_at: optionalString,
@@ -138,6 +141,7 @@ const orderFields = {
   status: optionalString,
   store: storeSchema.optional(),
   items: z.array(itemSchema).optional(),
+  items_truncation: truncationSchema.optional(),
   fulfillment: z.enum(["delivery", "pickup"]).optional(),
   delivery_address: locationSchema.optional(),
   delivery_time: optionalString,
@@ -156,8 +160,11 @@ export const orderSchema = z.object(orderFields);
 const contractErrorSchema = z.object({
   code: z.string(),
   message: z.string(),
-  retryable: z.boolean().optional(),
-  recovery_tool: z.string().optional()
+  retryable: z.boolean(),
+  recovery_tool: z.string().optional(),
+  recovery_arguments: z
+    .record(z.string(), z.union([z.string(), z.number(), z.boolean()]))
+    .optional()
 });
 
 function cardSchema(kind, fields) {
@@ -167,6 +174,15 @@ function cardSchema(kind, fields) {
     kind: z.literal(kind),
     ...fields,
     warnings: z.array(z.string()).optional()
+  });
+}
+
+function errorCardSchema(kind) {
+  return z.object({
+    schema: z.literal(RESPONSE_SCHEMA),
+    version: z.literal(RESPONSE_SCHEMA_VERSION),
+    kind: z.literal(kind),
+    error: contractErrorSchema
   });
 }
 
@@ -544,22 +560,33 @@ function normalizeSelectedOptions(value) {
   return value.map((entry) => {
     const source = asObject(entry);
     const nested = normalizeSelectedOptions(source.options);
+    const explicitOptionName = stringValue(
+      source.value,
+      source.option_name,
+      source.item_extra_option?.name
+    );
+    const groupName = stringValue(
+      source.group_name,
+      source.item_extra_option?.item_extra?.name,
+      explicitOptionName ? source.name : undefined
+    );
     return compactRecord([
       [
-        "name",
-        stringValue(
-          source.group_name,
-          source.item_extra_option?.item_extra?.name,
-          source.name
+        "option_id",
+        idValue(
+          source.option_id,
+          source.id,
+          source.item_extra_option?.option_id,
+          source.item_extra_option?.id
         )
       ],
       [
-        "value",
-        stringValue(
-          source.value,
-          source.item_extra_option?.name,
-          source.option_name
-        )
+        "group_name",
+        groupName
+      ],
+      [
+        "option_name",
+        explicitOptionName || stringValue(source.name)
       ],
       ["quantity", numberValue(source.quantity)],
       ["price", money(first(source.price, source.unit_price))],
@@ -584,11 +611,30 @@ function looksLikeModifierGroups(value) {
   );
 }
 
-function modifierGroups(value) {
+const MAX_MODIFIER_DEPTH = 5;
+const MAX_MODIFIER_GROUPS = 25;
+const MAX_MODIFIER_OPTIONS = 100;
+
+function modifierGroups(
+  value,
+  state = { groups: 0, options: 0 },
+  depth = 0
+) {
   if (!Array.isArray(value) || value.length === 0) {
     return undefined;
   }
+  if (depth >= MAX_MODIFIER_DEPTH) {
+    throw new UpstreamSchemaError(
+      "DoorDash modifier data exceeded the safe MCP size limit. No cart change was made; use DoorDash checkout instead of retrying this item."
+    );
+  }
   assertObjectArray(value, "modifier groups");
+  state.groups += value.length;
+  if (state.groups > MAX_MODIFIER_GROUPS) {
+    throw new UpstreamSchemaError(
+      "DoorDash modifier data exceeded the safe MCP size limit. No cart change was made; use DoorDash checkout instead of retrying this item."
+    );
+  }
   return value.map((entry) => {
     const source = asObject(entry);
     const optionValues = first(
@@ -603,6 +649,12 @@ function modifierGroups(value) {
       );
     }
     assertObjectArray(optionValues, "modifier options");
+    state.options += optionValues.length;
+    if (state.options > MAX_MODIFIER_OPTIONS) {
+      throw new UpstreamSchemaError(
+        "DoorDash modifier data exceeded the safe MCP size limit. No cart change was made; use DoorDash checkout instead of retrying this item."
+      );
+    }
     const minimum = numberValue(
       source.min_selections,
       source.min_num_options,
@@ -628,19 +680,27 @@ function modifierGroups(value) {
       [
         "options",
         Array.isArray(optionValues)
-          ? optionValues.map((option) => {
+          ? optionValues.flatMap((option) => {
               const item = asObject(option);
-              const nestedGroups = modifierGroups(
-                first(item.modifier_groups, item.extras, item.options)
+              const optionId = idValue(
+                item.option_id,
+                item.item_extra_option_id,
+                item.id
               );
-              return compactRecord([
+              if (!optionId) {
+                throw new UpstreamSchemaError(
+                  "DoorDash modifier data omitted an option_id. No cart change was made; use DoorDash checkout instead of guessing or retrying this item."
+                );
+              }
+              const nestedGroups = modifierGroups(
+                first(item.modifier_groups, item.extras, item.options),
+                state,
+                depth + 1
+              );
+              return [compactRecord([
                 [
                   "option_id",
-                  idValue(
-                    item.option_id,
-                    item.item_extra_option_id,
-                    item.id
-                  )
+                  optionId
                 ],
                 [
                   "name",
@@ -670,7 +730,7 @@ function modifierGroups(value) {
                 ],
                 ["quantity", numberValue(item.quantity)],
                 ["modifier_groups", nestedGroups]
-              ]);
+              ])];
             })
           : []
       ]
@@ -678,7 +738,14 @@ function modifierGroups(value) {
   });
 }
 
-function normalizeItem(value, { cartLine = false } = {}) {
+function normalizeItem(
+  value,
+  {
+    cartLine = false,
+    includeModifierGroups = true,
+    includeSubstitutions = true
+  } = {}
+) {
   const source = asObject(value) || {};
   const nestedItem = asObject(source.item) || {};
   const substitutions = first(source.substitutions, source.alternatives);
@@ -794,11 +861,21 @@ function normalizeItem(value, { cartLine = false } = {}) {
     ["selected_options", selectedOptions],
     [
       "substitutions",
-      Array.isArray(substitutions) && substitutions.length
-        ? substitutions.map((entry) => normalizeItem(entry))
+      includeSubstitutions &&
+      Array.isArray(substitutions) &&
+      substitutions.length
+        ? substitutions.map((entry) =>
+            normalizeItem(entry, {
+              includeModifierGroups,
+              includeSubstitutions: false
+            })
+          )
         : undefined
     ],
-    ["modifier_groups", modifierGroups(rawOptions)]
+    [
+      "modifier_groups",
+      includeModifierGroups ? modifierGroups(rawOptions) : undefined
+    ]
   ]);
 }
 
@@ -1010,15 +1087,16 @@ function normalizePricing(value, { tipCents } = {}) {
   return nonEmptyRecord(result);
 }
 
-function normalizeCart(value) {
+function normalizeCart(value, { itemLimit = 100 } = {}) {
   const wrapper = asObject(value) || {};
   const source = {
     ...wrapper,
     ...(asObject(wrapper.cart) || {})
   };
-  const items = Array.isArray(source.items)
-    ? source.items.map((entry) => normalizeItem(entry, { cartLine: true }))
-    : [];
+  const rawItems = Array.isArray(source.items) ? source.items : [];
+  const items = rawItems
+    .slice(0, itemLimit)
+    .map((entry) => normalizeItem(entry, { cartLine: true }));
   const storeValue =
     asObject(source.store) ||
     (source.store_id || source.store_name
@@ -1041,6 +1119,7 @@ function normalizeCart(value) {
         : undefined
     ],
     ["items", items],
+    ["items_truncation", truncation(rawItems.length, items.length)],
     [
       "fulfillment",
       normalizeFulfillment(
@@ -1093,8 +1172,12 @@ function normalizeOrder(value, options = {}) {
     options.preferPreview && Array.isArray(previewItems)
       ? previewItems
       : nonEmptySourceItems || firstSourceItems || quoteItems(quote);
+  const itemLimit =
+    Number.isInteger(options.itemLimit) && options.itemLimit >= 0
+      ? options.itemLimit
+      : 100;
   const items = Array.isArray(itemsSource)
-    ? itemsSource.map((entry) =>
+    ? itemsSource.slice(0, itemLimit).map((entry) =>
         entry?.item_id || entry?.cart_item_id
           ? normalizeItem(entry, { cartLine: true })
           : normalizeItem(entry)
@@ -1228,6 +1311,12 @@ function normalizeOrder(value, options = {}) {
         : undefined
     ],
     ["items", items],
+    [
+      "items_truncation",
+      Array.isArray(itemsSource)
+        ? truncation(itemsSource.length, items.length)
+        : undefined
+    ],
     ["fulfillment", fulfillment],
     [
       "delivery_address",
@@ -1324,10 +1413,13 @@ function storeSearchProject(data) {
   }
   const rawStores = source.stores;
   assertObjectArray(rawStores, "store-search response");
-  const stores = rawStores.slice(0, 100).map((entry) => normalizeStore(entry));
+  const normalizedStores = rawStores
+    .slice(0, 100)
+    .map((entry) => normalizeStore(entry));
+  const stores = normalizedStores.filter((store) => store.store_id);
   const warnings = warningList(source.warning);
-  if (stores.some((store) => !store.store_id)) {
-    warnings.push("Some stores are missing an ID needed for follow-up tools.");
+  if (stores.length !== normalizedStores.length) {
+    warnings.push("Stores without a usable store_id were omitted.");
   }
   return card(
     "store_search",
@@ -1352,15 +1444,12 @@ function storeDetailsProject(data) {
     throw new UpstreamSchemaError("DoorDash returned invalid store details.");
   }
   const store = normalizeStore(source.store || source);
-  if (Object.keys(store).length === 0) {
+  if (!store.store_id) {
     throw new UpstreamSchemaError(
-      "DoorDash store details did not contain a usable store."
+      "DoorDash store details did not contain the store_id needed for follow-up tools."
     );
   }
-  const warnings = store.store_id
-    ? []
-    : ["The store is missing an ID needed for follow-up tools."];
-  return card("store_details", { store }, warnings);
+  return card("store_details", { store });
 }
 
 function menuProject(data) {
@@ -1407,15 +1496,46 @@ function menuProject(data) {
     );
   }
   assertObjectArray(rawItems, "menu items");
-  const items = rawItems.slice(0, 250).map((entry) => normalizeItem(entry));
+  const normalizedItems = rawItems
+    .slice(0, 50)
+    .map((entry) =>
+      normalizeItem(entry, {
+        includeModifierGroups: false,
+        includeSubstitutions: false
+      })
+    );
+  const items = normalizedItems.filter((item) => item.item_id && item.name);
+  const returnedItemIds = new Set(items.map((item) => item.item_id));
   const storeValue =
     source.store ||
     (source.store_id || source.store_name
       ? { store_id: source.store_id, store_name: source.store_name }
       : undefined);
   const warnings = warningList(source.warning);
-  if (items.some((item) => !item.item_id)) {
-    warnings.push("Some menu items are missing an ID needed for cart tools.");
+  if (items.length !== normalizedItems.length) {
+    warnings.push("Menu items without item_id or name were omitted.");
+  }
+  if (rawItems.length > 50) {
+    warnings.push(
+      `${rawItems.length - 50} menu items were omitted. Call get_menu again with query set to the requested dish name.`
+    );
+  }
+  const appliedQuery = stringValue(source.mcp_query);
+  if (items.length === 0 && appliedQuery) {
+    warnings.push(
+      `No menu items matched query "${appliedQuery}". Do not repeat it unchanged; try one broader dish name or call get_menu once without query.`
+    );
+  }
+  if (categories.length > 50) {
+    warnings.push(
+      `${categories.length - 50} menu categories were omitted. Use query to request the dish name directly.`
+    );
+  }
+  const menuId = idValue(source.menu_id, source.menuId);
+  if (!menuId) {
+    throw new UpstreamSchemaError(
+      "DoorDash menu response did not contain menu_id."
+    );
   }
   return card(
     "menu",
@@ -1426,25 +1546,28 @@ function menuProject(data) {
           ? normalizeStore(storeValue, { includeDiscovery: false })
           : undefined
       ],
-      ["menu_id", idValue(source.menu_id, source.menuId)],
+      ["menu_id", menuId],
       ["items", items],
       [
         "categories",
         categories.length
-          ? categories.map((category) =>
-              compactRecord([
-                ["category_id", idValue(category.id, category.category_id)],
-                ["name", stringValue(category.name, category.title)],
-                [
-                  "item_ids",
-                  Array.isArray(category.items)
-                    ? category.items
-                        .map((item) => idValue(item.item_id, item.id))
-                        .filter(Boolean)
-                    : []
-                ]
-              ])
-            )
+          ? categories
+              .slice(0, 50)
+              .map((category) =>
+                compactRecord([
+                  ["category_id", idValue(category.id, category.category_id)],
+                  ["name", stringValue(category.name, category.title)],
+                  [
+                    "item_ids",
+                    Array.isArray(category.items)
+                      ? category.items
+                          .map((item) => idValue(item.item_id, item.id))
+                          .filter((itemId) => returnedItemIds.has(itemId))
+                      : []
+                  ]
+                ])
+              )
+              .filter((category) => category.item_ids.length > 0)
           : undefined
       ],
       [
@@ -1466,19 +1589,23 @@ function itemDetailsProject(data) {
     throw new UpstreamSchemaError("DoorDash returned invalid item details.");
   }
   const item = normalizeItem(source.item || source);
-  if (Object.keys(item).length === 0) {
+  if (!item.item_id || !item.name) {
     throw new UpstreamSchemaError(
-      "DoorDash item details did not contain a usable item."
+      "DoorDash item details did not contain item_id and name."
     );
   }
-  const warnings = item.item_id
-    ? []
-    : ["The item is missing an ID needed for cart tools."];
   const storeValue =
     source.store ||
     (source.store_id || source.store_name
       ? { store_id: source.store_id, store_name: source.store_name }
       : undefined);
+  const menuId = idValue(source.menu_id, source.menuId);
+  const warnings = warningList(source.warning);
+  if (!menuId) {
+    warnings.push(
+      "DoorDash did not return menu_id. This item cannot be sent to add_cart_items until a menu_id is available."
+    );
+  }
   return card(
     "item_details",
     compactRecord([
@@ -1488,7 +1615,7 @@ function itemDetailsProject(data) {
           ? normalizeStore(storeValue, { includeDiscovery: false })
           : undefined
       ],
-      ["menu_id", idValue(source.menu_id, source.menuId)],
+      ["menu_id", menuId],
       ["item", item]
     ]),
     warnings
@@ -1544,15 +1671,26 @@ function itemSearchProject(data) {
     );
   }
   const groups = itemSearchGroups(source);
+  let omittedItems = 0;
   const results = groups.map((group) => {
     assertObjectArray(group.items, "item-search results");
-    const items = group.items.slice(0, 25).map((entry) => normalizeItem(entry));
+    const normalizedItems = group.items
+      .slice(0, 25)
+      .map((entry) => normalizeItem(entry));
+    const items = normalizedItems.filter((item) => item.item_id && item.name);
+    omittedItems += normalizedItems.length - items.length;
     return compactRecord([
       ["query", group.query],
       ["items", items],
       ["truncation", truncation(group.items.length, items.length)]
     ]);
   });
+  const warnings = warningList(source.warning);
+  if (omittedItems) {
+    warnings.push(
+      `${omittedItems} item-search result${omittedItems === 1 ? "" : "s"} without item_id or name ${omittedItems === 1 ? "was" : "were"} omitted.`
+    );
+  }
   return card(
     "item_search",
     compactRecord([
@@ -1564,7 +1702,7 @@ function itemSearchProject(data) {
       ],
       ["results", results]
     ]),
-    warningList(source.warning)
+    warnings
   );
 }
 
@@ -1576,14 +1714,18 @@ function groceryProject(data) {
     );
   }
   assertObjectArray(source.items, "grocery-list items");
-  const items = source.items.slice(0, 25).map((entry) => normalizeItem(entry));
+  const normalizedItems = source.items
+    .slice(0, 25)
+    .map((entry) => normalizeItem(entry));
+  const items = normalizedItems.filter((item) => item.item_id && item.name);
   const rawStores = Array.isArray(source.available_stores)
     ? source.available_stores
     : [];
   assertObjectArray(rawStores, "grocery-list stores");
-  const availableStores = rawStores
+  const normalizedStores = rawStores
     .slice(0, 25)
     .map((entry) => normalizeStore(entry));
+  const availableStores = normalizedStores.filter((store) => store.store_id);
   const selectedStoreId = idValue(
     source.store_id,
     source.items[0]?.store_id,
@@ -1595,11 +1737,24 @@ function groceryProject(data) {
     image_url: source.store_image_url,
     delivery_time: source.delivery_time
   });
+  const menuId = idValue(source.menu_id);
+  const warnings = warningList(source.warning);
+  if (items.length !== normalizedItems.length) {
+    warnings.push("Grocery results without item_id or name were omitted.");
+  }
+  if (availableStores.length !== normalizedStores.length) {
+    warnings.push("Available stores without store_id were omitted.");
+  }
+  if (items.length && !menuId) {
+    warnings.push(
+      "DoorDash did not return menu_id. Call get_item_details for a chosen item before add_cart_items."
+    );
+  }
   return card(
     "grocery_list",
     compactRecord([
       ["store", nonEmptyRecord(selectedStore)],
-      ["menu_id", idValue(source.menu_id)],
+      ["menu_id", menuId],
       ["items", items],
       [
         "available_stores",
@@ -1619,8 +1774,231 @@ function groceryProject(data) {
         truncation(rawStores.length, availableStores.length)
       ]
     ]),
-    warningList(source.warning)
+    warnings
   );
+}
+
+function normalizedCartItemError(entry) {
+  const sourceEntry = asObject(entry) || {};
+  const requestSource = asObject(sourceEntry.request) || {};
+  const item = normalizeItem(
+    sourceEntry.item || sourceEntry.request || sourceEntry
+  );
+  const rawRequestIndex = numberValue(
+    sourceEntry.request_index,
+    requestSource.request_index
+  );
+  const requestIndex =
+    Number.isInteger(rawRequestIndex) && rawRequestIndex >= 0
+      ? rawRequestIndex
+      : undefined;
+  return {
+    request_index: requestIndex,
+    item: compactRecord([
+      ["item_id", item.item_id],
+      ["name", item.name],
+      ["quantity", item.quantity],
+      ["selected_options", item.selected_options]
+    ]),
+    message: stringValue(sourceEntry.error_message, sourceEntry.message),
+    modifier_groups: modifierGroups(
+      first(
+        sourceEntry.required_options,
+        sourceEntry.modifier_groups,
+        item.modifier_groups
+      )
+    )
+  };
+}
+
+function failedLine(item) {
+  return compactRecord([
+    ["item_id", item?.item_id],
+    ["name", item?.name],
+    ["quantity", item?.quantity],
+    ["selected_options", item?.selected_options]
+  ]);
+}
+
+function selectedOptionsSignature(item) {
+  return JSON.stringify(item?.selected_options || []);
+}
+
+function mergeCartItemErrors(request, errors, requests = []) {
+  const messages = [
+    ...new Set(errors.map((error) => error.message).filter(Boolean))
+  ];
+  const seenGroups = new Set();
+  const groups = [];
+  for (const error of errors) {
+    for (const group of error.modifier_groups || []) {
+      const signature = JSON.stringify(group);
+      if (!seenGroups.has(signature)) {
+        seenGroups.add(signature);
+        groups.push(group);
+      }
+    }
+  }
+  const ambiguousIndexes = [
+    ...new Set(
+      errors.flatMap((error) => error.ambiguous_candidates || [])
+    )
+  ];
+  return compactRecord([
+    ["request_index", request?.request_index ?? errors[0]?.request_index],
+    ["item", request ? failedLine(request) : errors[0]?.item],
+    ["message", messages.length ? messages.join(" ") : undefined],
+    ["modifier_groups", groups.length ? groups : undefined],
+    ["ambiguous", ambiguousIndexes.length ? true : undefined],
+    [
+      "candidates",
+      ambiguousIndexes.length
+        ? ambiguousIndexes.map((index) => ({
+            request_index: requests[index].request_index,
+            item: failedLine(requests[index])
+          }))
+        : undefined
+    ]
+  ]);
+}
+
+function reconcileCartItemErrors(rawErrors, requestedItems) {
+  const normalized = rawErrors.map(normalizedCartItemError);
+  if (!requestedItems.length) {
+    const seen = new Set();
+    const errors = [];
+    for (const error of normalized) {
+      const signature = JSON.stringify(error);
+      if (!seen.has(signature) && errors.length < 50) {
+        seen.add(signature);
+        errors.push(error);
+      }
+    }
+    return {
+      errors,
+      collapsed: normalized.length - errors.length,
+      positional: 0
+    };
+  }
+
+  const requests = requestedItems.map((entry, index) => {
+    const item = normalizeItem(entry);
+    const rawRequestIndex = numberValue(entry.request_index);
+    return {
+      request_index:
+        Number.isInteger(rawRequestIndex) && rawRequestIndex >= 0
+          ? rawRequestIndex
+          : index,
+      item_id: item.item_id,
+      name: item.name,
+      quantity: item.quantity,
+      selected_options: item.selected_options
+    };
+  });
+  const buckets = requests.map(() => []);
+  let positional = 0;
+  for (const error of normalized) {
+    const errorId = error.item?.item_id;
+    const errorName = normalizedChoiceText(error.item?.name);
+    const explicitIndex = requests.findIndex(
+      (request) => request.request_index === error.request_index
+    );
+    let candidates =
+      explicitIndex >= 0
+        ? [explicitIndex]
+        : requests
+            .map((request, index) => ({ request, index }))
+            .filter(({ request }) => errorId && request.item_id === errorId)
+            .map(({ index }) => index);
+    if (!candidates.length && errorName) {
+      candidates = requests
+        .map((request, index) => ({ request, index }))
+        .filter(
+          ({ request }) => normalizedChoiceText(request.name) === errorName
+        )
+        .map(({ index }) => index);
+    }
+    if (candidates.length > 1 && error.item?.selected_options?.length) {
+      const optionMatches = candidates.filter(
+        (index) =>
+          selectedOptionsSignature(requests[index]) ===
+          selectedOptionsSignature(error.item)
+      );
+      if (optionMatches.length) {
+        candidates = optionMatches;
+      }
+    }
+    if (!candidates.length) {
+      candidates = buckets
+        .map((bucket, index) => ({ bucket, index }))
+        .filter(({ bucket }) => bucket.length === 0)
+        .map(({ index }) => index);
+      if (!candidates.length) {
+        candidates = requests.map((_, index) => index);
+      }
+      positional += 1;
+    }
+    const target =
+      candidates.find((index) => buckets[index].length === 0) ??
+      candidates[0];
+    buckets[target].push({
+      ...error,
+      ...(candidates.length > 1
+        ? { ambiguous_candidates: candidates }
+        : {})
+    });
+  }
+
+  const errors = buckets.flatMap((bucket, index) =>
+    bucket.length
+      ? [mergeCartItemErrors(requests[index], bucket, requests)]
+      : []
+  );
+  return {
+    errors,
+    collapsed: normalized.length - errors.length,
+    positional
+  };
+}
+
+const MAX_CART_ERROR_MODIFIER_DETAILS = 2;
+
+function limitCartErrorModifierDetails(errors) {
+  const seenItemIds = new Set();
+  let kept = 0;
+  let omitted = 0;
+  let repeated = 0;
+  const limited = errors.map((error) => {
+    if (!error.modifier_groups?.length) {
+      return error;
+    }
+    const itemId = error.item?.item_id;
+    const { modifier_groups: _modifierGroups, ...withoutGroups } = error;
+    if (itemId && seenItemIds.has(itemId)) {
+      repeated += 1;
+      return {
+        ...withoutGroups,
+        message: `${withoutGroups.message || "This item needs attention."} Use the modifier choices listed for the same item_id above.`
+      };
+    }
+    if (itemId) {
+      seenItemIds.add(itemId);
+    }
+    if (kept < MAX_CART_ERROR_MODIFIER_DETAILS) {
+      kept += 1;
+      return error;
+    }
+    omitted += 1;
+    return {
+      ...withoutGroups,
+      message: `${withoutGroups.message || "This item needs attention."} Modifier choices were omitted to keep this result small; call get_item_details for this item_id before retrying.`
+    };
+  });
+  return { errors: limited, omitted, repeated };
+}
+
+function normalizedChoiceText(value) {
+  return String(value || "").trim().toLowerCase().replace(/\s+/g, " ");
 }
 
 function cartProject(data) {
@@ -1640,42 +2018,61 @@ function cartProject(data) {
   }
   assertObjectArray(rawErrors, "cart item errors");
   const cartData = normalizeCart(source);
-  const itemErrors = rawErrors.map((entry) => {
-    const sourceEntry = asObject(entry) || {};
-    const item = normalizeItem(
-      sourceEntry.item || sourceEntry.request || sourceEntry
+  if (!cartData.cart_uuid && rawErrors.length === 0) {
+    throw new UpstreamSchemaError(
+      "DoorDash cart response did not contain cart_uuid."
     );
-    const errorItem = compactRecord([
-      ["item_id", item.item_id],
-      ["name", item.name],
-      ["quantity", item.quantity]
-    ]);
-    return compactRecord([
-      ["item", errorItem],
-      [
-        "message",
-        stringValue(sourceEntry.error_message, sourceEntry.message)
-      ],
-      [
-        "modifier_groups",
-        modifierGroups(
-          first(
-            sourceEntry.required_options,
-            sourceEntry.modifier_groups,
-            item.modifier_groups
-          )
-        )
-      ]
-    ]);
-  });
+  }
+  const requestedItems = Array.isArray(source.mcp_requested_items)
+    ? source.mcp_requested_items
+    : [];
+  assertObjectArray(requestedItems, "requested cart items");
+  const reconciled = reconcileCartItemErrors(rawErrors, requestedItems);
+  const limitedDetails = limitCartErrorModifierDetails(
+    reconciled.errors
+  );
+  const itemErrors = limitedDetails.errors;
   const warnings = warningList(source.warning);
-  if (!cartData.cart_uuid) {
-    warnings.push("The cart is missing its UUID.");
+  const cartLinesWithoutIds = cartData.items.filter(
+    (item) => !item.cart_item_id
+  ).length;
+  if (cartLinesWithoutIds) {
+    warnings.push(
+      `${cartLinesWithoutIds} cart line${cartLinesWithoutIds === 1 ? " is" : "s are"} missing cart_item_id and cannot be passed to remove_cart_item. Do not substitute item_id.`
+    );
+  }
+  if (reconciled.collapsed > 0) {
+    warnings.push(
+      `${reconciled.collapsed} duplicate or excess cart item error${reconciled.collapsed === 1 ? " was" : "s were"} collapsed to one result per requested line.`
+    );
+  }
+  if (reconciled.positional > 0) {
+    warnings.push(
+      `${reconciled.positional} cart item error${reconciled.positional === 1 ? " was" : "s were"} missing a matching item identifier and were reconciled by request order. Inspect the cart before retrying.`
+    );
+  }
+  if (limitedDetails.omitted > 0) {
+    warnings.push(
+      `${limitedDetails.omitted} modifier choice set${limitedDetails.omitted === 1 ? " was" : "s were"} omitted from cart errors. Call get_item_details for those item_id values before retrying.`
+    );
+  }
+  if (limitedDetails.repeated > 0) {
+    warnings.push(
+      `${limitedDetails.repeated} repeated modifier choice set${limitedDetails.repeated === 1 ? " was" : "s were"} omitted; use the choices shown for the same item_id.`
+    );
   }
   return card(
     "cart",
     {
       ...cartData,
+      ...(requestedItems.length
+        ? {
+            added_line_count: Math.max(
+              0,
+              requestedItems.length - itemErrors.length
+            )
+          }
+        : {}),
       ...(itemErrors.length ? { item_errors: itemErrors } : {})
     },
     warnings
@@ -1690,7 +2087,33 @@ function cartListProject(data) {
     );
   }
   assertObjectArray(source.carts, "cart-list response");
-  const carts = source.carts.slice(0, 100).map((entry) => normalizeCart(entry));
+  const normalizedCarts = source.carts
+    .slice(0, 25)
+    .map((entry) => normalizeCart(entry, { itemLimit: 10 }));
+  const carts = normalizedCarts.filter((cart) => cart.cart_uuid);
+  const warnings = warningList(source.warning);
+  if (carts.length !== normalizedCarts.length) {
+    warnings.push("Carts without cart_uuid were omitted.");
+  }
+  const omittedItems = carts.reduce(
+    (total, cart) => total + (cart.items_truncation?.omitted || 0),
+    0
+  );
+  if (omittedItems) {
+    warnings.push(
+      `${omittedItems} cart line${omittedItems === 1 ? " was" : "s were"} omitted from list_carts. Call show_cart for one cart's details.`
+    );
+  }
+  const linesWithoutIds = carts.reduce(
+    (total, cart) =>
+      total + cart.items.filter((item) => !item.cart_item_id).length,
+    0
+  );
+  if (linesWithoutIds) {
+    warnings.push(
+      `${linesWithoutIds} listed cart line${linesWithoutIds === 1 ? " is" : "s are"} missing cart_item_id. Call show_cart before remove_cart_item and never substitute item_id.`
+    );
+  }
   return card(
     "cart_list",
     compactRecord([
@@ -1704,7 +2127,7 @@ function cartListProject(data) {
         )
       ]
     ]),
-    warningList(source.warning)
+    warnings
   );
 }
 
@@ -1729,20 +2152,30 @@ function actionProject(kind, fallbackMessage) {
     if (booleanValue(source.success) === false) {
       operationError(source, `${fallbackMessage} failed.`);
     }
+    if (booleanValue(source.success) !== true) {
+      throw new UpstreamSchemaError(
+        `DoorDash ${kind} response did not confirm success.`
+      );
+    }
+    const identifiers =
+      kind === "address_update"
+        ? compactRecord([
+            ["address_id", idValue(source.address_id, source.id)]
+          ])
+        : kind === "cart_mutation"
+          ? compactRecord([
+              ["cart_uuid", idValue(source.cart_uuid, source.id)]
+            ])
+          : compactRecord([
+              ["cart_uuid", idValue(source.cart_uuid)],
+              ["promo_code", stringValue(source.promo_code)]
+            ]);
     return card(
       kind,
-      compactRecord([
-        [
-          "resource_id",
-          idValue(
-            source.cart_uuid,
-            source.order_uuid,
-            source.address_id,
-            source.id
-          )
-        ],
-        ["message", stringValue(source.message)]
-      ]),
+      {
+        ...identifiers,
+        ...compactRecord([["message", stringValue(source.message)]])
+      },
       warningList(source.warning)
     );
   };
@@ -1778,9 +2211,23 @@ function orderListProject(data) {
     );
   }
   assertObjectArray(source.orders, "order-history response");
-  const orders = source.orders
-    .slice(0, 100)
-    .map((entry) => normalizeOrder(entry));
+  const normalizedOrders = source.orders
+    .slice(0, 25)
+    .map((entry) => normalizeOrder(entry, { itemLimit: 10 }));
+  const orders = normalizedOrders.filter((order) => order.order_uuid);
+  const warnings = warningList(source.warning);
+  if (orders.length !== normalizedOrders.length) {
+    warnings.push("Orders without order_uuid were omitted.");
+  }
+  const omittedItems = orders.reduce(
+    (total, order) => total + (order.items_truncation?.omitted || 0),
+    0
+  );
+  if (omittedItems) {
+    warnings.push(
+      `${omittedItems} order-history item${omittedItems === 1 ? " was" : "s were"} omitted. Call get_receipt with one order_uuid for itemized detail.`
+    );
+  }
   return card(
     "order_list",
     compactRecord([
@@ -1794,7 +2241,7 @@ function orderListProject(data) {
         )
       ]
     ]),
-    warningList(source.warning)
+    warnings
   );
 }
 
@@ -1825,6 +2272,21 @@ function previewProject(data) {
     }
     assertObjectArray(order.order_items, "order-preview items");
   }
+  const previewItemCount = source.quote.store_order_cart.orders.reduce(
+    (total, order) => total + order.order_items.length,
+    0
+  );
+  if (previewItemCount > 100) {
+    throw new DoorDashOperationError(
+      "DoorDash order preview contains more than 100 item lines. MCP submission is disabled for this cart; finish in browser checkout.",
+      {
+        code: "PREVIEW_TOO_LARGE",
+        details: {
+          cart_uuid: idValue(source.cart_uuid, source.quote.id)
+        }
+      }
+    );
+  }
   const order = normalizeOrder(source);
   const quote = source.quote;
   if (
@@ -1838,7 +2300,7 @@ function previewProject(data) {
   }
   const tipGroups = quote.tips_suggestion_details || [];
   assertObjectArray(tipGroups, "tip suggestions");
-  const tipSuggestions = tipGroups.flatMap((group) => {
+  const normalizedTipSuggestions = tipGroups.flatMap((group) => {
     if (
       group.percentage_to_amount_monetary_values !== undefined &&
       group.percentage_to_amount_monetary_values !== null &&
@@ -1869,9 +2331,20 @@ function previewProject(data) {
       ])
     );
   });
+  const tipSuggestions = normalizedTipSuggestions.filter(
+    (suggestion) => suggestion.amount !== undefined
+  );
   const budgets =
     quote.expense_order_options?.all_eligible_expense_order_budgets;
-  const eligibleBudgets = Array.isArray(budgets)
+  if (budgets !== undefined && budgets !== null && !Array.isArray(budgets)) {
+    throw new UpstreamSchemaError(
+      "DoorDash order preview contained malformed work budgets."
+    );
+  }
+  if (Array.isArray(budgets)) {
+    assertObjectArray(budgets, "work budgets");
+  }
+  const normalizedBudgets = Array.isArray(budgets)
     ? budgets.map((budget) =>
         compactRecord([
           ["budget_id", idValue(budget.id)],
@@ -1888,18 +2361,93 @@ function previewProject(data) {
         ])
       )
     : [];
+  const eligibleBudgets = normalizedBudgets.filter(
+    (budget) => budget.budget_id && budget.name
+  );
+  const workTeamId = idValue(
+    quote.company_payment_info?.team_order_info?.team_id
+  );
   const workBenefits = nonEmptyRecord(
     compactRecord([
-      [
-        "team_id",
-        idValue(quote.company_payment_info?.team_order_info?.team_id)
-      ],
+      ["team_id", workTeamId],
       [
         "eligible_budgets",
         eligibleBudgets.length ? eligibleBudgets : undefined
       ]
     ])
   );
+  const previewOptions = asObject(source.mcp_preview_options) || {};
+  const selectedBudgetId = idValue(previewOptions.budget_id);
+  const selectedBudget = selectedBudgetId
+    ? eligibleBudgets.find((budget) => budget.budget_id === selectedBudgetId)
+    : undefined;
+  const pinHandoffRequired = Boolean(
+    Array.isArray(quote.dropoff_options) &&
+      quote.dropoff_options.some(
+        (option) =>
+          stringValue(option?.proof_of_delivery_type)?.toUpperCase() ===
+          "PIN_CODE"
+      )
+  );
+  const fulfillment = order.fulfillment || previewOptions.fulfillment;
+  const expectedDeliveryAddress =
+    order.delivery_address?.address ??
+    (fulfillment === "pickup" ? null : undefined);
+  const submitContext = {
+    ...compactRecord([
+    ["cart_uuid", order.cart_uuid],
+    ["preview_token", stringValue(source.mcp_preview_token)],
+    ["expected_total_before_tip", order.pricing?.total_before_tip],
+    [
+      "scheduled_time",
+      order.scheduled_time || stringValue(previewOptions.scheduled_time)
+    ],
+    ["fulfillment", fulfillment],
+    ["priority", booleanValue(previewOptions.priority) === true],
+    [
+      "apply_credits",
+      booleanValue(previewOptions.apply_credits) !== false
+    ],
+    [
+      "pin_handoff_required",
+      pinHandoffRequired ? true : false
+    ],
+    ["budget_id", workTeamId ? selectedBudget?.budget_id : undefined]
+    ]),
+    expected_delivery_address: expectedDeliveryAddress
+  };
+  for (const field of [
+    "cart_uuid",
+    "expected_total_before_tip",
+    "expected_delivery_address",
+    "fulfillment",
+    "priority",
+    "apply_credits",
+    "pin_handoff_required"
+  ]) {
+    if (submitContext[field] === undefined) {
+      throw new UpstreamSchemaError(
+        `DoorDash order preview did not contain ${field} needed for safe submission.`
+      );
+    }
+  }
+  const warnings = warningList(source.warning);
+  if (tipSuggestions.length !== normalizedTipSuggestions.length) {
+    warnings.push("Tip suggestions without an amount were omitted.");
+  }
+  if (eligibleBudgets.length !== normalizedBudgets.length) {
+    warnings.push("Work budgets without budget_id or name were omitted.");
+  }
+  if (eligibleBudgets.length && !workTeamId) {
+    warnings.push(
+      "DoorDash returned work budgets without team_id; those budgets cannot be used for submission."
+    );
+  }
+  if (selectedBudgetId && !selectedBudget) {
+    warnings.push(
+      "The selected budget_id is no longer eligible. Choose a current budget and call preview_order again before submitting."
+    );
+  }
   return card(
     "order_preview",
     compactRecord([
@@ -1909,9 +2457,10 @@ function previewProject(data) {
         "tip_suggestions",
         tipSuggestions.length ? tipSuggestions : undefined
       ],
-      ["work_benefits", workBenefits]
+      ["work_benefits", workBenefits],
+      ["submit_context", submitContext]
     ]),
-    warningList(source.warning)
+    warnings
   );
 }
 
@@ -1944,10 +2493,16 @@ function receiptProject(data) {
       "DoorDash receipt did not contain pricing."
     );
   }
+  const warnings = warningList(source.warning);
+  if (order.items_truncation?.omitted) {
+    warnings.push(
+      `${order.items_truncation.omitted} receipt item lines were omitted from the MCP response. Use DoorDash checkout history for the complete receipt.`
+    );
+  }
   return card(
     "receipt",
     order,
-    warningList(source.warning)
+    warnings
   );
 }
 
@@ -1962,10 +2517,12 @@ function reorderProject(data) {
     operationError(source, "Reorder failed.");
   }
   const cartData = normalizeCart(source);
-  const warnings = cartData.cart_uuid
-    ? []
-    : ["The reordered cart is missing its UUID."];
-  return card("reorder", cartData, warnings);
+  if (!cartData.cart_uuid) {
+    throw new UpstreamSchemaError(
+      "DoorDash reorder response did not contain the new cart_uuid. The outcome is unknown."
+    );
+  }
+  return card("reorder", cartData);
 }
 
 function orderStatusProject(data) {
@@ -2047,7 +2604,7 @@ function addressesProject(data) {
     );
   }
   assertObjectArray(source.addresses, "address-list response");
-  const addresses = source.addresses.map((address) =>
+  const normalizedAddresses = source.addresses.map((address) =>
     compactRecord([
       ["address_id", idValue(address.address_id, address.id)],
       ["label", stringValue(address.label, address.name)],
@@ -2059,7 +2616,12 @@ function addressesProject(data) {
       ["is_default", booleanValue(address.is_default)]
     ])
   );
-  return card("address_list", { addresses });
+  const addresses = normalizedAddresses.filter((address) => address.address_id);
+  const warnings = warningList(source.warning);
+  if (addresses.length !== normalizedAddresses.length) {
+    warnings.push("Saved addresses without address_id were omitted.");
+  }
+  return card("address_list", { addresses }, warnings);
 }
 
 function paymentMethodsProject(data) {
@@ -2071,7 +2633,7 @@ function paymentMethodsProject(data) {
   }
   assertObjectArray(source.cards, "payment-method response");
   const defaultId = idValue(source.default_payment_method_id);
-  const cards = source.cards.map((card) =>
+  const normalizedCards = source.cards.map((card) =>
     compactRecord([
       ["brand", stringValue(card.brand)],
       ["last4", stringValue(card.last4)],
@@ -2085,7 +2647,17 @@ function paymentMethodsProject(data) {
       ]
     ])
   );
-  return card("payment_methods", { cards });
+  const cards = normalizedCards.filter((card) => card.brand && card.last4);
+  const warnings = warningList(source.warning);
+  if (cards.length !== normalizedCards.length) {
+    warnings.push("Cards without brand or last4 were omitted.");
+  }
+  if (cards.length && !cards.some((card) => card.is_default === true)) {
+    warnings.push(
+      "DoorDash did not identify a default card. Do not guess which card will be charged."
+    );
+  }
+  return card("payment_methods", { cards }, warnings);
 }
 
 function promosProject(data) {
@@ -2097,7 +2669,7 @@ function promosProject(data) {
     );
   }
   assertObjectArray(rawPromos, "promotions response");
-  const promotions = rawPromos.map((promo) =>
+  const normalizedPromotions = rawPromos.map((promo) =>
     compactRecord([
       ["promo_code", stringValue(promo.promo_code, promo.code)],
       ["store_id", idValue(promo.store_id, source.store_id)],
@@ -2109,7 +2681,14 @@ function promosProject(data) {
       ["discount", money(first(promo.discount, promo.discount_amount))]
     ])
   );
-  return card("promotion_list", { promotions });
+  const promotions = normalizedPromotions.filter(
+    (promotion) => promotion.promo_code
+  );
+  const warnings = warningList(source.warning);
+  if (promotions.length !== normalizedPromotions.length) {
+    warnings.push("Promotions without promo_code were omitted.");
+  }
+  return card("promotion_list", { promotions }, warnings);
 }
 
 function activityProject(data) {
@@ -2130,18 +2709,31 @@ const categorySchema = z.object({
   item_ids: z.array(z.string())
 });
 
+const failedLineSchema = z.object({
+  item_id: optionalString,
+  name: optionalString,
+  quantity: optionalNumber,
+  selected_options: z.array(selectedOptionSchema).optional()
+});
+
 const itemErrorSchema = z.object({
-  item: z.object({
-    item_id: optionalString,
-    name: optionalString,
-    quantity: optionalNumber
-  }),
+  request_index: z.number().int().nonnegative().optional(),
+  item: failedLineSchema,
   message: optionalString,
-  modifier_groups: z.array(modifierGroupSchema).optional()
+  modifier_groups: z.array(modifierGroupSchema).optional(),
+  ambiguous: z.literal(true).optional(),
+  candidates: z
+    .array(
+      z.object({
+        request_index: z.number().int().nonnegative(),
+        item: failedLineSchema
+      })
+    )
+    .optional()
 });
 
 const addressSchema = z.object({
-  address_id: optionalString,
+  address_id: z.string(),
   label: optionalString,
   address: optionalString,
   latitude: optionalNumber,
@@ -2150,15 +2742,15 @@ const addressSchema = z.object({
 });
 
 const cardPaymentSchema = z.object({
-  brand: optionalString,
-  last4: optionalString,
+  brand: z.string(),
+  last4: z.string(),
   exp_month: optionalNumber,
   exp_year: optionalNumber,
   is_default: optionalBoolean
 });
 
 const promotionSchema = z.object({
-  promo_code: optionalString,
+  promo_code: z.string(),
   store_id: optionalString,
   title: optionalString,
   description: optionalString,
@@ -2169,7 +2761,7 @@ const promotionSchema = z.object({
 });
 
 const tipSuggestionSchema = z.object({
-  amount: moneySchema.optional(),
+  amount: moneySchema,
   percentage: optionalNumber,
   recommended: z.literal(true).optional(),
   recipient: optionalString
@@ -2180,8 +2772,8 @@ const workBenefitsSchema = z.object({
   eligible_budgets: z
     .array(
       z.object({
-        budget_id: optionalString,
-        name: optionalString,
+        budget_id: z.string(),
+        name: z.string(),
         remaining: moneySchema.optional(),
         team_account_id: optionalString,
         expense_code_mode: optionalString,
@@ -2191,12 +2783,25 @@ const workBenefitsSchema = z.object({
     .optional()
 });
 
+const submitContextSchema = z.object({
+  cart_uuid: z.string(),
+  preview_token: z.string(),
+  expected_total_before_tip: moneySchema,
+  expected_delivery_address: z.string().nullable(),
+  scheduled_time: optionalString,
+  fulfillment: z.enum(["delivery", "pickup"]),
+  priority: z.boolean(),
+  apply_credits: z.boolean(),
+  pin_handoff_required: z.boolean(),
+  budget_id: optionalString
+});
+
 const schemaByKind = {
   address_list: cardSchema("address_list", {
     addresses: z.array(addressSchema)
   }),
   address_update: cardSchema("address_update", {
-    resource_id: optionalString,
+    address_id: z.string(),
     message: optionalString
   }),
   grocery_list: cardSchema("grocery_list", {
@@ -2229,7 +2834,7 @@ const schemaByKind = {
   }),
   menu: cardSchema("menu", {
     store: storeSchema.optional(),
-    menu_id: optionalString,
+    menu_id: z.string(),
     items: z.array(itemSchema),
     categories: z.array(categorySchema).optional(),
     truncation: truncationSchema.optional()
@@ -2246,7 +2851,7 @@ const schemaByKind = {
     truncation: truncationSchema.optional()
   }),
   cart_mutation: cardSchema("cart_mutation", {
-    resource_id: optionalString,
+    cart_uuid: z.string(),
     message: optionalString
   }),
   checkout_link: cardSchema("checkout_link", {
@@ -2254,7 +2859,12 @@ const schemaByKind = {
     checkout_url: z.string()
   }),
   order_list: cardSchema("order_list", {
-    orders: z.array(orderSchema),
+    orders: z.array(
+      z.object({
+        ...orderFields,
+        order_uuid: z.string()
+      })
+    ),
     truncation: truncationSchema.optional()
   }),
   order_preview: cardSchema("order_preview", {
@@ -2262,20 +2872,25 @@ const schemaByKind = {
     items: z.array(itemSchema),
     pricing_quote_id: optionalString,
     tip_suggestions: z.array(tipSuggestionSchema).optional(),
-    work_benefits: workBenefitsSchema.optional()
+    work_benefits: workBenefitsSchema.optional(),
+    submit_context: submitContextSchema
   }),
   receipt: cardSchema("receipt", {
     ...orderFields,
     items: z.array(itemSchema),
     pricing: pricingSchema
   }),
-  reorder: cardSchema("reorder", cartFields),
+  reorder: cardSchema("reorder", {
+    ...cartFields,
+    cart_uuid: z.string()
+  }),
   order_status: cardSchema("order_status", orderFields),
   promotion_list: cardSchema("promotion_list", {
     promotions: z.array(promotionSchema)
   }),
   promotion_mutation: cardSchema("promotion_mutation", {
-    resource_id: optionalString,
+    cart_uuid: z.string(),
+    promo_code: z.string(),
     message: optionalString
   }),
   payment_methods: cardSchema("payment_methods", {
@@ -2296,9 +2911,279 @@ const schemaByKind = {
 function defineContract(kind, project, outputSchema = schemaByKind[kind]) {
   return {
     kind,
-    outputSchema,
+    outputSchema: z.union([errorCardSchema(kind), outputSchema]),
+    successSchema: outputSchema,
     project
   };
+}
+
+const publicSelectedOptionSchema = z.looseObject({
+  option_id: optionalString,
+  option_name: optionalString,
+  quantity: optionalNumber
+});
+
+const publicModifierOptionSchema = z.lazy(() =>
+  z.looseObject({
+    option_id: z.string(),
+    name: optionalString,
+    available: optionalBoolean,
+    modifier_groups: z.array(publicModifierGroupSchema).optional()
+  })
+);
+
+const publicModifierGroupSchema = z.lazy(() =>
+  z.looseObject({
+    group_id: optionalString,
+    name: optionalString,
+    min_selections: optionalNumber,
+    max_selections: optionalNumber,
+    options: z.array(publicModifierOptionSchema).optional()
+  })
+);
+
+const publicActionableItemSchema = z.looseObject({
+  item_id: z.string(),
+  name: z.string()
+});
+
+const publicDetailedItemSchema = z.looseObject({
+  item_id: z.string(),
+  name: z.string(),
+  modifier_groups: z.array(publicModifierGroupSchema).optional()
+});
+
+const publicCartItemSchema = z.looseObject({
+  item_id: optionalString,
+  cart_item_id: optionalString,
+  name: optionalString,
+  quantity: optionalNumber,
+  selected_options: z.array(publicSelectedOptionSchema).optional()
+});
+
+const publicFailedLineSchema = z.looseObject({
+  item_id: optionalString,
+  name: optionalString,
+  quantity: optionalNumber,
+  selected_options: z.array(publicSelectedOptionSchema).optional()
+});
+
+const publicItemErrorSchema = z.looseObject({
+  request_index: z.number().int().nonnegative().optional(),
+  item: publicFailedLineSchema,
+  message: optionalString,
+  modifier_groups: z.array(publicModifierGroupSchema).optional(),
+  ambiguous: z.literal(true).optional(),
+  candidates: z
+    .array(
+      z.looseObject({
+        request_index: z.number().int().nonnegative(),
+        item: publicFailedLineSchema
+      })
+    )
+    .optional()
+});
+
+const publicStoreReferenceSchema = z.looseObject({
+  store_id: z.string(),
+  name: optionalString
+});
+
+const publicOrderReferenceSchema = z.looseObject({
+  order_uuid: z.string(),
+  status: optionalString
+});
+
+const publicAddressSchema = z.looseObject({
+  address_id: z.string(),
+  label: optionalString,
+  address: optionalString,
+  is_default: optionalBoolean
+});
+
+const publicPaymentCardSchema = z.looseObject({
+  brand: z.string(),
+  last4: z.string(),
+  is_default: optionalBoolean
+});
+
+const publicPromotionSchema = z.looseObject({
+  promo_code: z.string(),
+  campaign_id: optionalString,
+  ad_group_id: optionalString,
+  ad_id: optionalString
+});
+
+const publicPricingSchema = z.looseObject({
+  total_before_tip: optionalNumber,
+  tip: optionalNumber,
+  total: optionalNumber
+});
+
+const publicWorkBenefitsSchema = z.looseObject({
+  team_id: optionalString,
+  eligible_budgets: z
+    .array(
+      z.looseObject({
+        budget_id: z.string(),
+        name: z.string(),
+        remaining: optionalNumber,
+        team_account_id: optionalString,
+        expense_code_mode: optionalString,
+        expense_note_required: z.literal(true).optional()
+      })
+    )
+    .optional()
+});
+
+const publicErrorSchema = z.looseObject({
+  error: z.looseObject({
+    code: z.string(),
+    message: z.string(),
+    retryable: z.boolean(),
+    recovery_tool: optionalString,
+    recovery_arguments: z.looseObject({}).optional()
+  })
+});
+
+function publicSuccessFields(kind) {
+  switch (kind) {
+    case "address_list":
+      return { addresses: z.array(publicAddressSchema) };
+    case "address_update":
+      return { address_id: z.string() };
+    case "grocery_list":
+      return {
+        store: publicStoreReferenceSchema.optional(),
+        available_stores: z.array(publicStoreReferenceSchema).optional(),
+        menu_id: optionalString,
+        items: z.array(publicActionableItemSchema),
+        items_truncation: truncationSchema.optional()
+      };
+    case "item_search":
+      return {
+        results: z.array(
+          z.looseObject({
+            query: optionalString,
+            items: z.array(publicActionableItemSchema),
+            truncation: truncationSchema.optional()
+          })
+        )
+      };
+    case "store_search":
+      return {
+        stores: z.array(publicStoreReferenceSchema),
+        truncation: truncationSchema.optional()
+      };
+    case "store_details":
+      return { store: publicStoreReferenceSchema };
+    case "menu":
+      return {
+        menu_id: z.string(),
+        items: z.array(publicActionableItemSchema),
+        truncation: truncationSchema.optional()
+      };
+    case "item_details":
+      return {
+        store: publicStoreReferenceSchema.optional(),
+        menu_id: optionalString,
+        item: publicDetailedItemSchema
+      };
+    case "cart":
+      return {
+        cart_uuid: optionalString,
+        items: z.array(publicCartItemSchema),
+        items_truncation: truncationSchema.optional(),
+        fulfillment: z.enum(["delivery", "pickup"]).optional(),
+        checkout_url: optionalString,
+        item_errors: z.array(publicItemErrorSchema).optional(),
+        warnings: z.array(z.string()).optional()
+      };
+    case "cart_list":
+      return {
+        carts: z.array(
+          z.looseObject({
+            cart_uuid: z.string(),
+            items: z.array(publicCartItemSchema),
+            items_truncation: truncationSchema.optional(),
+            fulfillment: z.enum(["delivery", "pickup"]).optional()
+          })
+        ),
+        truncation: truncationSchema.optional(),
+        warnings: z.array(z.string()).optional()
+      };
+    case "cart_mutation":
+      return { cart_uuid: z.string() };
+    case "checkout_link":
+      return {
+        cart_uuid: optionalString,
+        checkout_url: z.string()
+      };
+    case "order_list":
+      return {
+        orders: z.array(publicOrderReferenceSchema),
+        truncation: truncationSchema.optional()
+      };
+    case "order_preview":
+      return {
+        items: z.array(publicCartItemSchema),
+        pricing: publicPricingSchema.optional(),
+        tip_suggestions: z
+          .array(
+            z.looseObject({
+              amount: z.number(),
+              recommended: z.literal(true).optional()
+            })
+          )
+          .optional(),
+        work_benefits: publicWorkBenefitsSchema.optional(),
+        submit_context: submitContextSchema
+      };
+    case "receipt":
+      return {
+        order_uuid: optionalString,
+        items: z.array(publicCartItemSchema),
+        items_truncation: truncationSchema.optional(),
+        pricing: publicPricingSchema
+      };
+    case "reorder":
+      return {
+        cart_uuid: z.string(),
+        items: z.array(publicCartItemSchema),
+        items_truncation: truncationSchema.optional(),
+        fulfillment: z.enum(["delivery", "pickup"]).optional()
+      };
+    case "order_status":
+      return {
+        order_uuid: optionalString,
+        status: z.string()
+      };
+    case "promotion_list":
+      return { promotions: z.array(publicPromotionSchema) };
+    case "promotion_mutation":
+      return {
+        cart_uuid: z.string(),
+        promo_code: z.string()
+      };
+    case "payment_methods":
+      return { cards: z.array(publicPaymentCardSchema) };
+    case "order_submit":
+      return {
+        order_uuid: z.string(),
+        status: optionalString,
+        items: z.array(publicCartItemSchema),
+        pricing: publicPricingSchema.optional()
+      };
+    default:
+      return {};
+  }
+}
+
+function publicOutputSchema(kind) {
+  return z.union([
+    publicErrorSchema,
+    z.looseObject(publicSuccessFields(kind))
+  ]);
 }
 
 export const contracts = {
@@ -2405,6 +3290,10 @@ export function contractForTool(name) {
   return toolContracts[name] || contracts.rawCli;
 }
 
+export function publicOutputSchemaForTool(name) {
+  return publicOutputSchema(contractForTool(name).kind);
+}
+
 export function contractForCommand(args) {
   const command = args.slice(0, 2).join(" ");
   return (
@@ -2432,46 +3321,151 @@ function errorCode(error) {
   return (
     stringValue(
       error?.code,
+      error?.details?.data?.error?.code,
       error?.details?.data?.error_reason,
       error?.details?.data?.code,
+      error?.details?.data?.structuredContent?.error?.code,
+      error?.details?.data?.structuredContent?.error_reason,
+      error?.details?.data?.structuredContent?.code,
       error?.details?.error_reason,
       error?.details?.code
     ) || "DOORDASH_CLI_ERROR"
   );
 }
 
-function recoveryToolFor(code, message) {
-  if (code === "ACTIVE_CART_EXISTS") {
-    return "show_cart";
-  }
-  if (
-    code === "AGENTIC_RESTRICTED_ITEM_NOT_ALLOWED" ||
-    /restricted item|finish.*browser|verification/i.test(message)
-  ) {
-    return "create_checkout_link";
-  }
-  if (/status|submission attempt|duplicate charge/i.test(message)) {
-    return "order_status";
+function detailValue(error, ...names) {
+  for (const name of names) {
+    const value =
+      error?.details?.[name] ??
+      error?.details?.data?.[name] ??
+      error?.details?.data?.error?.[name] ??
+      error?.details?.data?.structuredContent?.[name] ??
+      error?.details?.data?.structuredContent?.error?.[name];
+    if (value !== undefined && value !== null && value !== "") {
+      return String(value);
+    }
   }
   return undefined;
 }
 
-function retryableFor(code, message) {
-  if (code === "UPSTREAM_SCHEMA_ERROR") {
-    return false;
-  }
-  if (/timeout|temporar|try again/i.test(message)) {
-    return true;
-  }
-  if (/duplicate charge|already has a recorded submission/i.test(message)) {
-    return false;
+function detailObject(error, ...names) {
+  for (const name of names) {
+    const value =
+      error?.details?.[name] ??
+      error?.details?.data?.[name] ??
+      error?.details?.data?.error?.[name] ??
+      error?.details?.data?.structuredContent?.[name] ??
+      error?.details?.data?.structuredContent?.error?.[name];
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      return Object.fromEntries(
+        Object.entries(value).filter(([, entry]) =>
+          ["string", "number", "boolean"].includes(typeof entry)
+        )
+      );
+    }
   }
   return undefined;
+}
+
+function recoveryFor(error, code) {
+  const cartUuid = detailValue(error, "cart_uuid", "cartUuid");
+  const orderUuid = detailValue(error, "order_uuid", "orderUuid");
+  const storeId = detailValue(error, "store_id", "storeId");
+  const stateScope = detailValue(error, "state_scope", "stateScope");
+  const previewArguments = detailObject(
+    error,
+    "preview_arguments",
+    "previewArguments"
+  );
+  switch (code) {
+    case "CHECKOUT_STATE_CHANGE_IN_PROGRESS":
+      if (stateScope === "address") {
+        return { tool: "list_addresses", arguments: {} };
+      }
+      return cartUuid
+        ? { tool: "show_cart", arguments: { cart_uuid: cartUuid } }
+        : { tool: "list_carts", arguments: {} };
+    case "ADDRESS_MUTATION_OUTCOME_UNKNOWN":
+      return { tool: "list_addresses", arguments: {} };
+    case "CART_MUTATION_OUTCOME_UNKNOWN":
+      return cartUuid
+        ? { tool: "show_cart", arguments: { cart_uuid: cartUuid } }
+        : { tool: "list_carts", arguments: {} };
+    case "REORDER_OUTCOME_UNKNOWN":
+      return { tool: "list_carts", arguments: {} };
+    case "PROMO_MUTATION_OUTCOME_UNKNOWN":
+      return cartUuid
+        ? {
+            tool: "create_checkout_link",
+            arguments: { cart_uuid: cartUuid }
+          }
+        : undefined;
+    case "PREVIEW_OUTCOME_UNKNOWN":
+      return cartUuid
+        ? { tool: "show_cart", arguments: { cart_uuid: cartUuid } }
+        : undefined;
+    case "PREVIEW_TOO_LARGE":
+      return cartUuid
+        ? {
+            tool: "create_checkout_link",
+            arguments: { cart_uuid: cartUuid }
+          }
+        : undefined;
+    case "ACTIVE_CART_EXISTS":
+      return cartUuid
+        ? { tool: "show_cart", arguments: { cart_uuid: cartUuid } }
+        : undefined;
+    case "CART_WRITE_IN_PROGRESS":
+      return {
+        tool: "list_carts",
+        arguments: storeId ? { store_id: storeId } : {}
+      };
+    case "CART_WRITE_OUTCOME_UNKNOWN":
+      return cartUuid
+        ? { tool: "show_cart", arguments: { cart_uuid: cartUuid } }
+        : {
+            tool: "list_carts",
+            arguments: storeId ? { store_id: storeId } : {}
+          };
+    case "SUBMISSION_ALREADY_ATTEMPTED":
+      return orderUuid
+        ? { tool: "order_status", arguments: { order_uuid: orderUuid } }
+        : { tool: "list_orders", arguments: {} };
+    case "SUBMISSION_OUTCOME_UNKNOWN":
+      return { tool: "list_orders", arguments: {} };
+    case "SUBMISSION_REJECTED":
+      return cartUuid
+        ? {
+            tool: "create_checkout_link",
+            arguments: { cart_uuid: cartUuid }
+          }
+        : undefined;
+    case "ORDER_PREVIEW_CHANGED":
+    case "WORK_BUDGET_CHANGED":
+      return previewArguments
+        ? { tool: "preview_order", arguments: previewArguments }
+        : undefined;
+    case "PAYMENT_METHOD_CHANGED":
+      return { tool: "list_payment_methods", arguments: {} };
+    case "DEFAULT_ADDRESS_MISSING":
+    case "DEFAULT_ADDRESS_COORDINATES_MISSING":
+      return { tool: "list_addresses", arguments: {} };
+    case "AGENTIC_RESTRICTED_ITEM_NOT_ALLOWED":
+      return cartUuid
+        ? {
+            tool: "create_checkout_link",
+            arguments: { cart_uuid: cartUuid }
+          }
+        : undefined;
+    default:
+      return undefined;
+  }
 }
 
 export function errorEnvelope(contract, error) {
   const message = error instanceof Error ? error.message : String(error);
   const code = errorCode(error);
+  const recovery = recoveryFor(error, code);
   const payload = {
     schema: RESPONSE_SCHEMA,
     version: RESPONSE_SCHEMA_VERSION,
@@ -2479,18 +3473,12 @@ export function errorEnvelope(contract, error) {
     error: compactRecord([
       ["code", code],
       ["message", message],
-      ["retryable", retryableFor(code, message)],
-      ["recovery_tool", recoveryToolFor(code, message)]
+      ["retryable", false],
+      ["recovery_tool", recovery?.tool],
+      ["recovery_arguments", recovery?.arguments]
     ])
   };
-  return z
-    .object({
-      schema: z.literal(RESPONSE_SCHEMA),
-      version: z.literal(RESPONSE_SCHEMA_VERSION),
-      kind: z.string(),
-      error: contractErrorSchema
-    })
-    .parse(payload);
+  return errorCardSchema(contract.kind).parse(payload);
 }
 
 export function projectWithContract(contract, data) {
@@ -2518,32 +3506,111 @@ function summarizeModifierChoices(groups = []) {
   return groups
     .map((group) => {
       const groupName = group.name || group.group_id || "Modifier";
+      const minimum =
+        group.min_selections ?? (group.required === true ? 1 : 0);
+      const maximum = group.max_selections;
+      const rule =
+        minimum === 0
+          ? `optional; ${maximum ? `choose up to ${maximum}` : "omit for none"}`
+          : maximum === minimum
+            ? `required; choose exactly ${minimum}`
+            : `required; choose ${minimum}${maximum ? `-${maximum}` : "+"}`;
       const options = (group.options || [])
         .filter((option) => option.available !== false)
         .map((option) => {
           const name = option.name || option.option_id || "Unnamed option";
-          return option.option_id ? `${name} [${option.option_id}]` : name;
+          const label = option.option_id
+            ? `${name} [${option.option_id}]`
+            : name;
+          const nested = summarizeModifierChoices(option.modifier_groups);
+          return nested ? `${label} -> ${nested}` : label;
         });
-      return options.length ? `${groupName}: ${options.join(", ")}` : groupName;
+      return options.length
+        ? `${groupName} (${rule}): ${options.join(", ")}`
+        : `${groupName} (${rule})`;
     })
     .join("; ");
 }
 
-function summarizeCartErrors(itemErrors) {
+function summarizeSelectedOptions(options = []) {
+  return options
+    .map((option) => {
+      const optionName =
+        option.option_name || option.option_id || "unnamed option";
+      const label = option.group_name
+        ? `${option.group_name}: ${optionName}`
+        : optionName;
+      const nested = summarizeSelectedOptions(option.options);
+      return nested ? `${label} -> ${nested}` : label;
+    })
+    .join(", ");
+}
+
+function summarizeCartErrors(value) {
+  const itemErrors = value.item_errors;
   const issues = itemErrors.map((itemError, index) => {
     const item = itemError.item || {};
     const itemName =
       item.name || item.item_id || `cart item ${index + 1}`;
-    const message = itemError.message || "This item needs attention.";
+    const requestLabel =
+      itemError.request_index === undefined
+        ? itemName
+        : `request line ${itemError.request_index + 1} (${itemName})`;
+    const selected = summarizeSelectedOptions(item.selected_options);
+    const variant = selected ? ` [${selected}]` : "";
+    const message = (
+      itemError.message || "This item needs attention."
+    )
+      .replace(/\s*No cart changes were made\./gi, "")
+      .trim();
     const choices = summarizeModifierChoices(itemError.modifier_groups);
-    return `${index + 1}) ${itemName}: ${message}${choices ? ` Available choices: ${choices}.` : ""}`;
+    const candidates = itemError.candidates?.length
+      ? ` DoorDash did not identify the exact failed variant. Candidates: ${itemError.candidates
+          .map((candidate) => {
+            const candidateOptions = summarizeSelectedOptions(
+              candidate.item?.selected_options
+            );
+            return `request line ${candidate.request_index + 1}${
+              candidateOptions ? ` [${candidateOptions}]` : ""
+            }`;
+          })
+          .join(" or ")}.`
+      : "";
+    return `${index + 1}) ${requestLabel}${variant}: ${message}${choices ? ` Available choices: ${choices}.` : ""}${candidates}`;
   });
-  return `No cart changes were made. Fix all ${plural(itemErrors.length, "item issue")} before retrying add_cart_items once; never repeat the unchanged input. ${issues.join(" ")}`;
+  const addedLineCount = value.added_line_count ?? value.items.length;
+  const partial = addedLineCount > 0;
+  const ambiguous = itemErrors.some((itemError) => itemError.ambiguous);
+  const blocked = itemErrors.some((itemError) =>
+    /do not retry this item/i.test(itemError.message || "")
+  );
+  const prefix = ambiguous
+    ? `DoorDash did not identify which requested variant failed. Never resend the full batch. ${
+        value.cart_uuid
+          ? `First call show_cart with {"cart_uuid":"${value.cart_uuid}"}.`
+          : "First call list_carts."
+      } Compare the candidate request lines with the cart; add only a confirmed missing variant.`
+    : blocked
+      ? "No cart changes were made. At least one item cannot be added safely through MCP. Choose a different item or use DoorDash checkout; do not retry unchanged."
+    : partial
+      ? `Partial cart update: ${plural(addedLineCount, "cart line")} added and ${plural(itemErrors.length, "line")} failed. Never resend an added line or the full original batch. ${
+          value.cart_uuid
+            ? `First call show_cart with {"cart_uuid":"${value.cart_uuid}"}. Then add only the failed lines using that same cart_uuid.`
+            : "Inspect list_carts before making another cart change."
+        }`
+      : `No cart changes were made. Fix all ${plural(itemErrors.length, "item issue")} before retrying add_cart_items once; never repeat unchanged input. Use only choices the user already requested; otherwise ask. Do not guess.`;
+  const summary = `${prefix} ${issues.join(" ")}`;
+  return summary.length > 6_000
+    ? `${summary.slice(0, 5_900)} … Full modifier data is in the JSON result.`
+    : summary;
 }
 
 export function summarizeResponse(value) {
   if (value.error) {
-    return `${value.error.code}: ${value.error.message}`;
+    const next = value.error.recovery_tool
+      ? ` Next: call ${value.error.recovery_tool} once with ${JSON.stringify(value.error.recovery_arguments || {})}.`
+      : "";
+    return `${value.error.code}: ${value.error.message} Do not retry the unchanged call.${next}`;
   }
 
   switch (value.kind) {
@@ -2566,7 +3633,7 @@ export function summarizeResponse(value) {
     case "cart": {
       const errors = value.item_errors?.length || 0;
       if (errors) {
-        return summarizeCartErrors(value.item_errors);
+        return summarizeCartErrors(value);
       }
       return `${plural(value.items.length, "cart line")}${value.store?.name ? ` at ${value.store.name}` : ""}${errors ? `; ${plural(errors, "item")} still need${errors === 1 ? "s" : ""} attention` : ""}${value.checkout_url ? `. Checkout: ${value.checkout_url}` : "."}`;
     }
@@ -2623,10 +3690,13 @@ export function summarizeResponse(value) {
 
 export function toToolResult(structuredContent, { isError = false } = {}) {
   const resultIsError = isError || Boolean(structuredContent.error);
+  const warningText = structuredContent.warnings?.length
+    ? ` ${structuredContent.warnings.join(" ")}`
+    : "";
   const content = [
     {
       type: "text",
-      text: summarizeResponse(structuredContent)
+      text: `${summarizeResponse(structuredContent)}${warningText}`
     },
     {
       type: "text",
