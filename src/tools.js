@@ -17,7 +17,6 @@ import {
   receiptArgs,
   removeCartItemArgs,
   removePromoArgs,
-  reorderArgs,
   searchRestaurantsArgs,
   setAddressArgs,
   showCartArgs,
@@ -43,6 +42,7 @@ const legacyInputAliases = [
   ["address_id", ["addressId"]],
   ["store_id", ["storeId"]],
   ["menu_id", ["menuId"]],
+  ["option_queries", ["optionQueries"]],
   ["item_id", ["itemId"]],
   ["cart_uuid", ["cartUuid"]],
   ["cart_item_id", ["cartItemId"]],
@@ -74,6 +74,7 @@ const internalInputNames = [
   ["address_id", "addressId"],
   ["store_id", "storeId"],
   ["menu_id", "menuId"],
+  ["option_queries", "optionQueries"],
   ["item_id", "itemId"],
   ["cart_uuid", "cartUuid"],
   ["cart_item_id", "cartItemId"],
@@ -202,7 +203,13 @@ const selectedCartOptionSchema = z.lazy(() =>
         .max(500)
         .optional()
         .describe("Optional option name copied from the same response."),
-      quantity: z.number().int().min(1).default(1),
+      quantity: z
+        .number()
+        .int()
+        .min(1)
+        .max(100)
+        .default(1)
+        .describe("Number of this option to select, up to 100."),
       options: z
         .array(selectedCartOptionSchema)
         .max(50)
@@ -218,6 +225,37 @@ const selectedCartOptionSchema = z.lazy(() =>
   })
 );
 
+const requestedCartOptionSchema = z
+  .strictObject({
+    name: z
+      .string()
+      .min(1)
+      .max(300)
+      .describe(
+        "Exact option name returned by get_item_details or an item error. If one option_id appears in multiple groups, use the qualified name returned by the error, such as Sauce Ranch."
+      ),
+    quantity: z
+      .number()
+      .int()
+      .min(1)
+      .max(100)
+      .optional()
+      .describe("Number of this option to select, up to 100; omit for one."),
+    option_id: idSchema
+      .optional()
+      .describe(
+        "Copy option_id to disambiguate duplicate names such as a sauce and dressing both named Ranch. If DoorDash reuses one option_id in multiple groups, pair it with the exact qualified name returned by the error, such as Sauce Ranch."
+      )
+  })
+  .refine(
+    (option) =>
+      option.option_id === undefined || !option.option_id.startsWith("e_"),
+    {
+      message:
+        "option_id must identify a selectable option, not a modifier group such as e_...."
+    }
+  );
+
 const cartItemSchema = canonicalObject(
   {
     item_id: idSchema.describe(
@@ -230,11 +268,11 @@ const cartItemSchema = canonicalObject(
       .describe("Copy the menu item's exact name. Choices do not belong here."),
     quantity: z.number().int().min(1).max(10_000).default(1),
     requested_options: z
-      .array(z.string().min(1).max(300))
+      .array(requestedCartOptionSchema)
       .max(50)
       .optional()
       .describe(
-        "Restaurant choices for this line. Use an exact option name, or a Yes/No group name such as Utensils to select Yes. Omit an optional add-on to decline it; use No only when item details return a No option."
+        "Restaurant choices for this line. Each entry requires an exact option name; quantity repeats that choice and option_id disambiguates duplicate names. Resolution stays within the selected parent branch. If item_errors return multiple candidates, ask the user instead of guessing."
       ),
     nested_options: z
       .array(selectedCartOptionSchema)
@@ -566,7 +604,7 @@ export function registerDoorDashTools(server, context) {
     {
       title: "Get DoorDash Item Details",
       description:
-        "Return current pricing and selectable option_id values. IDs prefixed i_ use restaurant modifiers; other IDs use grocery or retail lookup. Restaurant menu_id is optional because the server can resolve it.",
+        "Return current pricing and selectable option_id values. IDs prefixed i_, or bare IDs paired with a restaurant menu_id, use restaurant modifiers; other IDs use grocery or retail lookup. Set option_queries to return compact matching paths from a large modifier tree instead of the whole tree.",
       inputSchema: canonicalObject({
         store_id: idSchema.describe(
           "Copy store_id from the search, menu, or item-search result."
@@ -576,7 +614,17 @@ export function registerDoorDashTools(server, context) {
         ),
         menu_id: idSchema
           .optional()
-          .describe("Optional menu_id copied from get_menu.")
+          .describe(
+            "Optional restaurant menu_id copied from get_menu, store details, an order, a cart line, or reorder. Supplying it routes a bare historical item_id through restaurant details."
+          ),
+        option_queries: z
+          .array(z.string().min(1).max(300))
+          .min(1)
+          .max(10)
+          .optional()
+          .describe(
+            "Option names to find, such as Ranch. Large trees return root choices plus bounded matching paths and explicit ambiguities."
+          )
       }),
       annotations: annotations({ readOnly: true })
     },
@@ -589,7 +637,7 @@ export function registerDoorDashTools(server, context) {
     {
       title: "Get DoorDash Restaurant Menu",
       description:
-        "Return a restaurant menu and menu_id. Set query to the requested dish name to keep the result small. You can call add_cart_items directly with requested_options; use get_item_details only to inspect choices.",
+        "Accept a restaurant store_id and return its menu_id and menu items. Set query to the requested dish name to keep the result small. menu_id is an output for item details and cart calls, not an input to this tool.",
       inputSchema: canonicalObject({
         store_id: idSchema.describe(
           "Copy store_id from search_restaurants or get_store_details."
@@ -646,7 +694,7 @@ export function registerDoorDashTools(server, context) {
     {
       title: "Add DoorDash Cart Items",
       description:
-        "Add the complete requested batch once. Copy store_id, menu_id, item_id, and exact item name. Put choices in requested_options or nested_options; satisfy every required modifier group. When extending cart_uuid, omit fulfillment to preserve its mode or copy show_cart.fulfillment. A preflight error makes no cart change; fix all lines, then retry once. A partial-add result may have written items; never resend. Success normally returns checkout_url.",
+        "Add the complete requested batch once. Copy store_id, menu_id, item_id, and exact item name. Put choices in structured requested_options or nested_options; use option_id when a name is ambiguous and preserve repeated choices with quantity. Satisfy every required modifier group. When extending cart_uuid, omit fulfillment to preserve its mode or copy show_cart.fulfillment. A preflight error makes no cart change; fix all lines, then retry once. A partial-add result may have written items; never resend. Success normally returns checkout_url.",
       inputSchema: cartInputSchema({
           store_id: idSchema.describe(
             "Copy store_id from get_menu, build_grocery_list, or get_item_details."
@@ -883,29 +931,14 @@ export function registerDoorDashTools(server, context) {
     {
       title: "Reorder DoorDash Order",
       description:
-        "Create one new cart from a past order using order_uuid from list_orders. Success requires a new cart_uuid. Compare it with history because unavailable items can be dropped; never repeat reorder after an unknown outcome.",
+        "Safely create one cart from a past order using order_uuid from list_orders. The server inspects the source order and refuses to merge into a nonempty same-store cart, executes reorder once, then returns a verified hydrated cart and any item, quantity, or modifier differences. If hydration fails, call the returned show_cart recovery once; never reorder again to inspect the outcome.",
       inputSchema: orderReferenceSchema(),
       annotations: annotations({
         readOnly: false,
         idempotent: false
       })
     },
-    async (input) =>
-      context.invoke(
-        reorderArgs({ orderUuid: orderUuidFromInput(input) }),
-        {
-          stateMutation: {
-            operation: "reorder",
-            stateScope: "carts"
-          },
-          mutationOutcome: {
-            code: "REORDER_OUTCOME_UNKNOWN",
-            message:
-              "DoorDash did not confirm the new reorder cart_uuid. Never reorder this order again blindly. Call list_carts once and inspect the newest cart.",
-            stateScope: "carts"
-          }
-        }
-      )
+    async (input) => context.reorder(input)
   );
 
   register(

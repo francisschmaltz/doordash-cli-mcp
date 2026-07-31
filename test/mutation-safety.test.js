@@ -67,6 +67,17 @@ test("unknown mutation outcomes return one concrete inspection action", async (t
     securityStore: store,
     runCli: async (args) => {
       calls.push(args);
+      if (args[0] === "order" && args[1] === "receipt") {
+        return cliResult({
+          order_uuid: "order-1",
+          store: { store_id: "store-1", name: "Example Store" },
+          items: [{ item_id: "item-1", name: "Meal", quantity: 1 }],
+          total: { unit_amount: 1000 }
+        });
+      }
+      if (args[0] === "cart" && args[1] === "list") {
+        return cliResult({ carts: [] });
+      }
       if (args[0] === "order" && args[1] === "reorder") {
         return cliResult({
           success: true,

@@ -143,6 +143,45 @@ test("every response contract validates its compact success response", () => {
   }
 });
 
+test("typed projections preserve semantic upstream failures before shape validation", () => {
+  for (const contract of new Set(Object.values(contracts))) {
+    if (contract.kind === "raw_cli") {
+      continue;
+    }
+    let error;
+    try {
+      projectWithContract(contract, {
+        success: false,
+        menu_id: "",
+        error_reason: "TEMPORARY_UPSTREAM_FAILURE",
+        message: "Please try again."
+      });
+    } catch (caught) {
+      error = caught;
+    }
+
+    assert.ok(error, `expected ${contract.kind} to reject success:false`);
+    assert.equal(error.name, "DoorDashOperationError");
+    assert.equal(error.message, "Please try again.");
+    const failure = errorEnvelope(contract, error);
+    assert.equal(failure.error.code, "TEMPORARY_UPSTREAM_FAILURE");
+    assert.equal(failure.error.message, "Please try again.");
+    assert.equal(failure.error.retryable, false);
+  }
+});
+
+test("raw CLI projections do not reinterpret command-specific success fields", () => {
+  const projected = projectWithContract(contracts.rawCli, {
+    success: false,
+    message: "Command-owned result"
+  });
+
+  assert.deepEqual(projected.result, {
+    success: false,
+    message: "Command-owned result"
+  });
+});
+
 test("errors are readable and include JSON for clients that ignore structuredContent", () => {
   for (const contract of new Set(Object.values(contracts))) {
     const failure = errorEnvelope(contract, new Error("Upstream exploded."));

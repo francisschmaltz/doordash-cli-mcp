@@ -24,7 +24,11 @@ import {
   menuArgs,
   orderStatusArgs,
   previewOrderArgs,
+  receiptArgs,
   restaurantItemDetailsArgs,
+  reorderArgs,
+  showCartArgs,
+  storeDetailsArgs,
   submitOrderArgs
 } from "./command-args.js";
 import {
@@ -37,9 +41,13 @@ import {
   contractForCommand,
   contracts,
   errorEnvelope,
+  normalizeModifierGroupsForResolution,
   projectWithContract,
   toToolResult
 } from "./response-contract.js";
+import {
+  resolveModifierSelections
+} from "./modifier-resolution.js";
 import { registerDoorDashTools } from "./tools.js";
 
 const SOURCE_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -47,7 +55,7 @@ const PUBLIC_DIR = path.resolve(SOURCE_DIR, "..", "public");
 const LOGIN_PATH = path.join(PUBLIC_DIR, "login.html");
 const LOGIN_SCRIPT_PATH = path.join(PUBLIC_DIR, "login.js");
 const STYLES_PATH = path.join(PUBLIC_DIR, "styles.css");
-const SERVER_VERSION = "0.4.4";
+const SERVER_VERSION = "0.5.0";
 const TERMINAL_ORDER_STATUSES = new Set([
   "successful",
   "action_required",
@@ -325,6 +333,226 @@ function normalizedChoiceText(value) {
     .trim();
 }
 
+function rawItemDetails(data) {
+  const source =
+    data && typeof data === "object" && !Array.isArray(data)
+      ? data
+      : {};
+  if (source.success === false || source.success === "false") {
+    throw new DoorDashCliError(
+      String(
+        source.error_message ||
+          source.fail_reason ||
+          source.message ||
+          source.error?.message ||
+          "DoorDash item lookup failed."
+      ),
+      {
+        code:
+          source.error_reason ||
+          source.code ||
+          source.error?.code ||
+          "DOORDASH_OPERATION_FAILED"
+      }
+    );
+  }
+  const item =
+    source.item &&
+    typeof source.item === "object" &&
+    !Array.isArray(source.item)
+      ? source.item
+      : source;
+  const itemId = item.item_id ?? item.menu_item_id ?? item.id;
+  const name = item.name ?? item.item_name;
+  if (itemId === undefined || itemId === null || !String(itemId).trim() || !name) {
+    throw new DoorDashCliError(
+      "DoorDash item details did not contain item_id and name.",
+      {
+        code: "UPSTREAM_SCHEMA_ERROR",
+        itemLookupEndpointMismatch: true
+      }
+    );
+  }
+  const available =
+    item.available === false ||
+    item.is_available === false ||
+    item.in_stock === false
+      ? false
+      : undefined;
+  return {
+    item_id: String(itemId),
+    name: String(name),
+    available
+  };
+}
+
+function canRetryItemLookupOnRestaurantEndpoint(error) {
+  const codes = [
+    error?.code,
+    error?.details?.code,
+    error?.details?.data?.code,
+    error?.details?.data?.error_reason,
+    error?.details?.data?.error?.code
+  ]
+    .filter((value) => value !== undefined && value !== null)
+    .map((value) => String(value).trim().toUpperCase());
+  if (
+    error?.details?.itemLookupEndpointMismatch === true ||
+    codes.some(
+      (code) =>
+        code === "NOT_FOUND" ||
+        code.endsWith("_ITEM_NOT_FOUND") ||
+        code === "ITEM_NOT_FOUND"
+    )
+  ) {
+    return true;
+  }
+
+  const message = error instanceof Error ? error.message : String(error || "");
+  return /\b(?:not (?:a )?(?:retail|grocery) item|item (?:was )?not found|no (?:such|matching) item|unknown item)\b/i.test(
+    message
+  );
+}
+
+function rawCartReference(value) {
+  const wrapper =
+    value && typeof value === "object" && !Array.isArray(value)
+      ? value
+      : {};
+  const cart =
+    wrapper.cart &&
+    typeof wrapper.cart === "object" &&
+    !Array.isArray(wrapper.cart)
+      ? wrapper.cart
+      : wrapper;
+  const cartUuid =
+    cart.cart_uuid ?? cart.uuid ?? cart.id ?? wrapper.cart_uuid;
+  const storeId =
+    cart.store_id ??
+    cart.store?.store_id ??
+    cart.store?.id ??
+    wrapper.store_id;
+  const items = Array.isArray(cart.items)
+    ? cart.items
+    : Array.isArray(wrapper.items)
+      ? wrapper.items
+      : undefined;
+  return {
+    cart_uuid:
+      cartUuid === undefined || cartUuid === null
+        ? undefined
+        : String(cartUuid),
+    store_id:
+      storeId === undefined || storeId === null
+        ? undefined
+        : String(storeId),
+    items
+  };
+}
+
+function comparableItemId(value) {
+  return String(value || "").replace(/^i_/, "");
+}
+
+function selectedOptionsComparisonKey(options) {
+  const normalized = (Array.isArray(options) ? options : [])
+    .map((option) => {
+      const nested = JSON.parse(
+        selectedOptionsComparisonKey(option.options)
+      );
+      return {
+        option_id: option.option_id || null,
+        option_name: option.option_name || null,
+        group_name: option.group_name || null,
+        quantity: Number(option.quantity ?? 1),
+        ...(nested.length ? { options: nested } : {})
+      };
+    })
+    .sort((left, right) =>
+      JSON.stringify(left).localeCompare(JSON.stringify(right))
+    );
+  return JSON.stringify(normalized);
+}
+
+function itemComparisonSummary(items) {
+  const summary = new Map();
+  for (const item of items) {
+    const itemId = comparableItemId(item.item_id);
+    if (!itemId) {
+      continue;
+    }
+    const current = summary.get(itemId) || {
+      name: item.name || item.item_id,
+      quantity: 0,
+      variants: new Map()
+    };
+    const quantity = Number(item.quantity ?? 1);
+    const variant = selectedOptionsComparisonKey(item.selected_options);
+    current.quantity += quantity;
+    current.variants.set(
+      variant,
+      (current.variants.get(variant) || 0) + quantity
+    );
+    summary.set(itemId, current);
+  }
+  return summary;
+}
+
+function variantSummariesMatch(left, right) {
+  const leftTotal = [...left.values()].reduce(
+    (total, quantity) => total + quantity,
+    0
+  );
+  const rightTotal = [...right.values()].reduce(
+    (total, quantity) => total + quantity,
+    0
+  );
+  return (
+    left.size === right.size &&
+    [...left].every(([variant, quantity]) =>
+      right.has(variant) &&
+      quantity * rightTotal === right.get(variant) * leftTotal
+    )
+  );
+}
+
+function reorderComparisonWarnings(sourceItems = [], cartItems = []) {
+  const cartById = itemComparisonSummary(cartItems);
+  const sourceById = itemComparisonSummary(sourceItems);
+  const warnings = [];
+
+  for (const [itemId, source] of sourceById) {
+    const current = cartById.get(itemId);
+    if (!current) {
+      warnings.push(
+        `${source.name || itemId} was present in the source order but is missing from the reordered cart.`
+      );
+      continue;
+    }
+    const sourceQuantity = source.quantity;
+    const currentQuantity = current.quantity;
+    if (sourceQuantity !== currentQuantity) {
+      warnings.push(
+        `${source.name || itemId} changed from quantity ${sourceQuantity} in history to ${currentQuantity} in the reordered cart.`
+      );
+    }
+    if (!variantSummariesMatch(source.variants, current.variants)) {
+      warnings.push(
+        `${source.name || itemId} has different modifier selections in the reordered cart than in the source order.`
+      );
+    }
+  }
+
+  for (const [itemId, current] of cartById) {
+    if (!sourceById.has(itemId)) {
+      warnings.push(
+        `${current.name || itemId} appears in the reordered cart but not in the source order.`
+      );
+    }
+  }
+  return warnings;
+}
+
 function filterMenuByQuery(data, query) {
   const normalizedQuery = normalizedChoiceText(query);
   if (!normalizedQuery || !data || typeof data !== "object") {
@@ -391,175 +619,6 @@ function filterMenuByQuery(data, query) {
         }
       : {})
   };
-}
-
-function cartOptionId(option) {
-  return option?.option_id || option?.optionId || option?.id;
-}
-
-function optionMatchesHint(option, group, hint) {
-  const optionName = normalizedChoiceText(option.name);
-  const groupName = normalizedChoiceText(group.name);
-  const requested = normalizedChoiceText(hint);
-  if (!optionName || !requested) {
-    return false;
-  }
-  if (requested === groupName) {
-    return /\byes\b/.test(optionName);
-  }
-  if (
-    requested === `no ${groupName}` ||
-    requested === `${groupName} no`
-  ) {
-    return /\bno\b/.test(optionName);
-  }
-  if (
-    requested === optionName ||
-    requested === `${groupName} ${optionName}`
-  ) {
-    return true;
-  }
-  return false;
-}
-
-function modifierHintMatchCount(groups = [], hint) {
-  return groups.reduce(
-    (count, group) =>
-      count +
-      (group.options || [])
-        .filter(
-          (option) => option.available !== false && option.option_id
-        )
-        .reduce(
-          (optionCount, option) =>
-            optionCount +
-            (optionMatchesHint(option, group, hint) ? 1 : 0) +
-            modifierHintMatchCount(option.modifier_groups, hint),
-          0
-        ),
-    0
-  );
-}
-
-function modifierResolution(groups = [], selections = [], hints = []) {
-  const remaining = [...selections];
-  const resolved = [];
-  const problems = [];
-  const matchedHints = new Set();
-
-  for (const group of groups) {
-    const options = (group.options || []).filter(
-      (option) => option.available !== false && option.option_id
-    );
-    const optionIds = new Set(options.map((option) => option.option_id));
-    const chosen = [];
-
-    for (let index = remaining.length - 1; index >= 0; index -= 1) {
-      if (optionIds.has(cartOptionId(remaining[index]))) {
-        chosen.unshift(remaining[index]);
-        remaining.splice(index, 1);
-      }
-    }
-
-    for (const option of options) {
-      const optionHints = hints.filter((hint) =>
-        optionMatchesHint(option, group, hint)
-      );
-      if (
-        !chosen.some(
-          (selection) => cartOptionId(selection) === option.option_id
-        ) &&
-        optionHints.length
-      ) {
-        chosen.push({
-          option_id: option.option_id,
-          name: option.name,
-          quantity: 1
-        });
-      }
-      if (
-        chosen.some(
-          (selection) => cartOptionId(selection) === option.option_id
-        )
-      ) {
-        for (const hint of optionHints) {
-          matchedHints.add(hint);
-        }
-      }
-    }
-
-    const minimum =
-      Number.isFinite(group.min_selections) && group.min_selections > 0
-        ? group.min_selections
-        : group.required
-          ? 1
-          : 0;
-    const maximum =
-      Number.isFinite(group.max_selections) && group.max_selections > 0
-        ? group.max_selections
-        : Infinity;
-
-    if (chosen.length < minimum && options.length === minimum) {
-      for (const option of options) {
-        if (
-          !chosen.some(
-            (selection) => cartOptionId(selection) === option.option_id
-          )
-        ) {
-          chosen.push({
-            option_id: option.option_id,
-            name: option.name,
-            quantity: 1
-          });
-        }
-      }
-    }
-
-    if (chosen.length < minimum) {
-      problems.push(
-        `Select at least ${minimum} option${minimum === 1 ? "" : "s"} for ${group.name || group.group_id || "a required modifier group"}.`
-      );
-    }
-    if (chosen.length > maximum) {
-      problems.push(
-        `Select no more than ${maximum} option${maximum === 1 ? "" : "s"} for ${group.name || group.group_id || "a modifier group"}.`
-      );
-    }
-
-    for (const selection of chosen) {
-      const option = options.find(
-        (candidate) => candidate.option_id === cartOptionId(selection)
-      );
-      if (!option) {
-        continue;
-      }
-      const nested = modifierResolution(
-        option.modifier_groups,
-        selection.options,
-        hints
-      );
-      problems.push(...nested.problems);
-      for (const matchedHint of nested.matchedHints) {
-        matchedHints.add(matchedHint);
-      }
-      resolved.push({
-        option_id: option.option_id,
-        name: option.name || selection.name || option.option_id,
-        quantity: selection.quantity ?? 1,
-        ...(nested.selections.length
-          ? { options: nested.selections }
-          : {})
-      });
-    }
-  }
-
-  for (const selection of remaining) {
-    problems.push(
-      `Selected option ${cartOptionId(selection) || "(missing ID)"} is not available for this item.`
-    );
-  }
-
-  return { selections: resolved, problems, matchedHints };
 }
 
 function statusValue(statusResult) {
@@ -806,8 +865,9 @@ export function createDoorDashApp({
   }
 
   function projectSignedPreview(data, input) {
-    const projected = contracts.orderPreview.project({
+    const projected = projectWithContract(contracts.orderPreview, {
       ...data,
+      mcp_preview_token: "pending",
       mcp_preview_options: {
         scheduled_time: input.scheduledTime,
         fulfillment: input.fulfillment,
@@ -858,6 +918,80 @@ export function createDoorDashApp({
       );
       throw error;
     }
+  }
+
+  async function inspectActiveCarts(storeId) {
+    const rawCartList = await executeCli(
+      listCartsArgs({ storeId }),
+      { project: (data) => data }
+    );
+    projectWithContract(contracts.cartList, rawCartList);
+    if (
+      rawCartList.truncated === true ||
+      (typeof rawCartList.truncated === "string" &&
+        rawCartList.truncated.trim().toLowerCase() === "true")
+    ) {
+      throw new DoorDashCliError(
+        "DoorDash returned a truncated active-cart list, so existing same-store cart contents cannot be ruled out. No cart mutation was attempted.",
+        {
+          code: "ACTIVE_CART_STATE_UNKNOWN",
+          storeId
+        }
+      );
+    }
+
+    const carts = [];
+    for (const rawCart of rawCartList.carts) {
+      const reference = rawCartReference(rawCart);
+      if (reference.store_id && reference.store_id !== storeId) {
+        continue;
+      }
+      if (!reference.cart_uuid) {
+        throw new DoorDashCliError(
+          "DoorDash listed an active cart without the cart_uuid needed to inspect it. No cart mutation was attempted.",
+          {
+            code: "ACTIVE_CART_STATE_UNKNOWN",
+            storeId
+          }
+        );
+      }
+
+      try {
+        const cart = reference.items
+          ? projectWithContract(contracts.cart, rawCart)
+          : await executeCli(
+              showCartArgs({ cartUuid: reference.cart_uuid }),
+              {
+                project: (data) =>
+                  projectWithContract(contracts.cart, data)
+              }
+            );
+        if (cart.cart_uuid !== reference.cart_uuid) {
+          throw new DoorDashCliError(
+            `DoorDash returned cart ${cart.cart_uuid} while inspecting active cart ${reference.cart_uuid}.`,
+            { code: "UPSTREAM_SCHEMA_ERROR" }
+          );
+        }
+        if (cart.store?.store_id && cart.store.store_id !== storeId) {
+          throw new DoorDashCliError(
+            `DoorDash returned store ${cart.store.store_id} while inspecting carts for store ${storeId}.`,
+            { code: "UPSTREAM_SCHEMA_ERROR" }
+          );
+        }
+        carts.push(cart);
+      } catch (error) {
+        throw new DoorDashCliError(
+          `DoorDash listed active cart ${reference.cart_uuid}, but its contents could not be verified. No cart mutation was attempted.`,
+          {
+            code: "ACTIVE_CART_STATE_UNKNOWN",
+            cartUuid: reference.cart_uuid,
+            storeId,
+            cause: error instanceof Error ? error.message : String(error)
+          }
+        );
+      }
+    }
+    return carts;
   }
 
   async function invoke(args, options = {}, authInfo) {
@@ -929,13 +1063,52 @@ export function createDoorDashApp({
     }
   }
 
-  async function getItemDetails(input, authInfo) {
-    if (!input.itemId.startsWith("i_")) {
+  async function resolveRestaurantMenuId(input) {
+    if (input.menuId) {
+      return input.menuId;
+    }
+
+    let storeDetails;
+    try {
+      storeDetails = await executeCli(
+        storeDetailsArgs({ storeId: input.storeId }),
+        { project: (data) => data }
+      );
+    } catch {
+      // The full-menu lookup below is an independent read-only fallback.
+    }
+    const storeMenuId =
+      storeDetails?.success === false || storeDetails?.success === "false"
+        ? undefined
+        : storeDetails?.menu_id ||
+          storeDetails?.menuId ||
+          storeDetails?.store?.menu_id ||
+          storeDetails?.store?.menuId;
+    if (storeMenuId !== undefined && String(storeMenuId).trim()) {
+      return String(storeMenuId);
+    }
+
+    const menu = await executeCli(menuArgs({ storeId: input.storeId }), {
+      project: (data) => projectWithContract(contracts.menu, data)
+    });
+    if (!menu.menu_id) {
+      throw new DoorDashCliError(
+        "DoorDash did not return the menu ID needed for restaurant item details."
+      );
+    }
+    return menu.menu_id;
+  }
+
+  async function getItemDetails(input) {
+    const restaurantItem =
+      input.itemId.startsWith("i_") || Boolean(input.menuId);
+    if (!restaurantItem) {
       try {
         const projected = await executeCli(itemDetailsArgs(input), {
           project: (data) =>
             projectWithContract(contracts.itemDetails, {
               ...data,
+              mcp_option_queries: input.optionQueries,
               store:
                 data?.store ||
                 (data?.store_id
@@ -950,18 +1123,7 @@ export function createDoorDashApp({
     }
 
     try {
-      let menuId = input.menuId;
-      if (!menuId) {
-        const menu = await executeCli(menuArgs({ storeId: input.storeId }), {
-          project: (data) => projectWithContract(contracts.menu, data)
-        });
-        menuId = menu.menu_id;
-        if (!menuId) {
-          throw new DoorDashCliError(
-            "DoorDash did not return the menu ID needed for restaurant item details."
-          );
-        }
-      }
+      const menuId = await resolveRestaurantMenuId(input);
       const projected = await executeCli(
         restaurantItemDetailsArgs({
           storeId: input.storeId,
@@ -973,6 +1135,7 @@ export function createDoorDashApp({
             projectWithContract(contracts.itemDetails, {
               ...data,
               menu_id: data?.menu_id || menuId,
+              mcp_option_queries: input.optionQueries,
               store:
                 data?.store ||
                 (data?.store_id
@@ -984,6 +1147,126 @@ export function createDoorDashApp({
       return toToolResult(projected);
     } catch (error) {
       return toolError(error, contracts.itemDetails);
+    }
+  }
+
+  async function reorder(input) {
+    let stateChangeToken;
+    try {
+      stateChangeToken = acquireCheckoutStateChange({
+        operation: "reorder",
+        stateScope: "carts"
+      });
+      const sourceOrder = await executeCli(
+        receiptArgs({ orderUuid: input.orderUuid }),
+        {
+          project: (data) => projectWithContract(contracts.receipt, data)
+        }
+      );
+      if (sourceOrder.order_uuid !== input.orderUuid) {
+        throw new DoorDashCliError(
+          `DoorDash returned receipt ${sourceOrder.order_uuid || "without an order_uuid"} while inspecting order ${input.orderUuid}. No reorder was attempted.`,
+          { code: "UPSTREAM_SCHEMA_ERROR" }
+        );
+      }
+      const storeId = sourceOrder.store?.store_id;
+      if (!storeId) {
+        throw new DoorDashCliError(
+          "DoorDash did not return the source order's store_id. No reorder was attempted.",
+          { code: "UPSTREAM_SCHEMA_ERROR" }
+        );
+      }
+
+      const activeCarts = await inspectActiveCarts(storeId);
+      const nonemptyCart = activeCarts.find(
+        (cart) => cart.items.length > 0
+      );
+      if (nonemptyCart) {
+        throw new DoorDashCliError(
+          `A nonempty DoorDash cart already exists at this store (${nonemptyCart.cart_uuid}). No reorder was attempted. Inspect that cart before choosing whether to extend or replace it.`,
+          {
+            code: "ACTIVE_CART_EXISTS",
+            cartUuid: nonemptyCart.cart_uuid,
+            storeId
+          }
+        );
+      }
+
+      let reordered;
+      try {
+        reordered = await executeCli(
+          reorderArgs({ orderUuid: input.orderUuid }),
+          {
+            project: (data) => projectWithContract(contracts.reorder, data)
+          }
+        );
+      } catch (error) {
+        if (error?.name === "DoorDashOperationError") {
+          throw error;
+        }
+        throw new DoorDashCliError(
+          "DoorDash did not confirm the new reorder cart_uuid. Never reorder this order again blindly. Call list_carts once and inspect the newest cart.",
+          {
+            code: "REORDER_OUTCOME_UNKNOWN",
+            storeId,
+            stateScope: "carts",
+            cause: error instanceof Error ? error.message : String(error)
+          }
+        );
+      }
+
+      try {
+        const hydrated = await executeCli(
+          showCartArgs({ cartUuid: reordered.cart_uuid }),
+          {
+            project: (data) => projectWithContract(contracts.cart, data)
+          }
+        );
+        if (hydrated.cart_uuid !== reordered.cart_uuid) {
+          throw new DoorDashCliError(
+            `DoorDash returned cart ${hydrated.cart_uuid} while hydrating reordered cart ${reordered.cart_uuid}.`,
+            { code: "UPSTREAM_SCHEMA_ERROR" }
+          );
+        }
+        if (
+          hydrated.store?.store_id &&
+          hydrated.store.store_id !== storeId
+        ) {
+          throw new DoorDashCliError(
+            `DoorDash returned store ${hydrated.store.store_id} while hydrating a reorder for store ${storeId}.`,
+            { code: "UPSTREAM_SCHEMA_ERROR" }
+          );
+        }
+        const warnings = [
+          ...(reordered.warnings || []),
+          ...(hydrated.warnings || []),
+          ...reorderComparisonWarnings(sourceOrder.items, hydrated.items)
+        ];
+        return toToolResult(
+          contracts.reorder.successSchema.parse({
+            ...hydrated,
+            schema: reordered.schema,
+            version: reordered.version,
+            kind: "reorder",
+            cart_uuid: reordered.cart_uuid,
+            ...(warnings.length ? { warnings: [...new Set(warnings)] } : {})
+          })
+        );
+      } catch (error) {
+        throw new DoorDashCliError(
+          `DoorDash created cart ${reordered.cart_uuid}, but its contents could not be verified. Call show_cart once with this cart_uuid; do not reorder again.`,
+          {
+            code: "REORDER_HYDRATION_FAILED",
+            cartUuid: reordered.cart_uuid,
+            storeId,
+            cause: error instanceof Error ? error.message : String(error)
+          }
+        );
+      }
+    } catch (error) {
+      return toolError(error, contracts.reorder);
+    } finally {
+      releaseCheckoutStateChange(stateChangeToken);
     }
   }
 
@@ -1040,27 +1323,14 @@ export function createDoorDashApp({
 
   async function preflightCartItems(input) {
     const items = [];
-    const itemErrors = input.items.flatMap((item, requestIndex) =>
-      !item.itemId.startsWith("i_") && item.requestedOptions?.length
-        ? [{
-        request: {
-          request_index: requestIndex,
-          item_id: item.itemId,
-          item_name: item.itemName,
-          quantity: item.quantity,
-          nested_options: item.nestedOptions
-        },
-        message:
-          "requested_options is supported only for i_-prefixed restaurant items. For grocery or retail choices, call get_item_details and send exact option_id values through nested_options."
-        }]
-        : []
-    );
+    const itemErrors = [];
     const itemIdsNeedingDetails = [
       ...new Set(
         input.items
           .filter(
             (item) =>
               item.itemId.startsWith("i_") ||
+              item.requestedOptions?.length ||
               item.nestedOptions?.length
           )
           .map((item) => item.itemId)
@@ -1070,6 +1340,29 @@ export function createDoorDashApp({
       return { items: input.items, itemErrors };
     }
 
+    const loadPreflightDetails = async (itemId, restaurantItem) => {
+      const rawDetails = await executeCli(
+        restaurantItem
+          ? restaurantItemDetailsArgs({
+              storeId: input.storeId,
+              menuId: input.menuId,
+              itemId
+            })
+          : itemDetailsArgs({
+              storeId: input.storeId,
+              itemId
+            }),
+        { project: (data) => data }
+      );
+      const details = rawItemDetails(rawDetails);
+      return {
+        ...details,
+        modifier_groups: normalizeModifierGroupsForResolution(
+          rawDetails?.item || rawDetails
+        )
+      };
+    };
+
     const detailEntries = [];
     for (let index = 0; index < itemIdsNeedingDetails.length; index += 4) {
       detailEntries.push(
@@ -1077,23 +1370,57 @@ export function createDoorDashApp({
           itemIdsNeedingDetails
             .slice(index, index + 4)
             .map(async (itemId) => {
-          const details = await executeCli(
-            itemId.startsWith("i_")
-              ? restaurantItemDetailsArgs({
-                  storeId: input.storeId,
-                  menuId: input.menuId,
-                  itemId
-                })
-              : itemDetailsArgs({
-                  storeId: input.storeId,
-                  itemId
-                }),
-            {
-              project: (data) =>
-                projectWithContract(contracts.itemDetails, data)
-            }
-          );
-          return [itemId, details.item];
+              const itemRequests = input.items.filter(
+                (item) => item.itemId === itemId
+              );
+              const restaurantItem =
+                itemId.startsWith("i_") ||
+                itemRequests.some(
+                  (item) => item.requestedOptions?.length
+                );
+              let details;
+              let detailsSource;
+              if (restaurantItem) {
+                details = await loadPreflightDetails(itemId, true);
+                detailsSource = "restaurant";
+              } else {
+                try {
+                  details = await loadPreflightDetails(itemId, false);
+                  detailsSource = "retail";
+                } catch (error) {
+                  if (!canRetryItemLookupOnRestaurantEndpoint(error)) {
+                    throw error;
+                  }
+                  details = await loadPreflightDetails(itemId, true);
+                  detailsSource = "restaurant";
+                }
+
+                const expectedNames = new Set(
+                  itemRequests.map((item) =>
+                    normalizedChoiceText(item.itemName)
+                  )
+                );
+                if (
+                  detailsSource === "retail" &&
+                  !expectedNames.has(normalizedChoiceText(details.name))
+                ) {
+                  try {
+                    const restaurantDetails =
+                      await loadPreflightDetails(itemId, true);
+                    if (
+                      expectedNames.has(
+                        normalizedChoiceText(restaurantDetails.name)
+                      )
+                    ) {
+                      details = restaurantDetails;
+                      detailsSource = "restaurant";
+                    }
+                  } catch {
+                    // Keep the successful retail details for the name error.
+                  }
+                }
+              }
+              return [itemId, details];
             })
         )
       );
@@ -1107,12 +1434,17 @@ export function createDoorDashApp({
         continue;
       }
       if (details.available === false) {
-        items.push(requestedItem);
+        const unavailableItem = {
+          ...requestedItem,
+          itemId: details.item_id || requestedItem.itemId,
+          itemName: details.name || requestedItem.itemName
+        };
+        items.push(unavailableItem);
         itemErrors.push({
           request: {
             request_index: requestIndex,
-            item_id: requestedItem.itemId,
-            item_name: requestedItem.itemName,
+            item_id: unavailableItem.itemId,
+            item_name: unavailableItem.itemName,
             quantity: requestedItem.quantity,
             nested_options: requestedItem.nestedOptions
           },
@@ -1122,40 +1454,16 @@ export function createDoorDashApp({
         continue;
       }
 
-      const requestedHints = [...(requestedItem.requestedOptions || [])];
       const hasWrongName =
         normalizedChoiceText(requestedItem.itemName) !==
         normalizedChoiceText(details.name);
-      const hintCounts = new Map(
-        requestedHints.map((hint) => [
-          hint,
-          modifierHintMatchCount(details.modifier_groups, hint)
-        ])
-      );
-      const unambiguousHints = requestedHints.filter(
-        (hint) => hintCounts.get(hint) === 1
-      );
-      const resolution = modifierResolution(
+      const resolution = resolveModifierSelections(
         details.modifier_groups,
-        requestedItem.nestedOptions,
-        unambiguousHints
-      );
-      for (const hint of requestedHints) {
-        const matchCount = hintCounts.get(hint);
-        if (matchCount === 0) {
-          resolution.problems.push(
-            `requested_options entry "${hint}" does not exactly match a current option or supported Yes/No group choice.`
-          );
-        } else if (matchCount > 1) {
-          resolution.problems.push(
-            `requested_options entry "${hint}" matches ${matchCount} choices. Use nested_options with exact option_id values instead.`
-          );
-        } else if (!resolution.matchedHints.has(hint)) {
-          resolution.problems.push(
-            `requested_options entry "${hint}" is nested under an unselected parent option. Use nested_options with the complete parent-to-child selection path.`
-          );
+        {
+          requestedOptions: requestedItem.requestedOptions,
+          nestedOptions: requestedItem.nestedOptions
         }
-      }
+      );
       if (hasWrongName) {
         resolution.problems.push(
           `name must exactly match "${details.name}". Put all choices in requested_options or nested_options.`
@@ -1163,6 +1471,7 @@ export function createDoorDashApp({
       }
       const resolvedItem = {
         ...requestedItem,
+        itemId: details.item_id || requestedItem.itemId,
         itemName: details.name || requestedItem.itemName,
         nestedOptions: resolution.selections
       };
@@ -1172,27 +1481,14 @@ export function createDoorDashApp({
         itemErrors.push({
           request: {
             request_index: requestIndex,
-            item_id: requestedItem.itemId,
-            item_name: requestedItem.itemName,
+            item_id: resolvedItem.itemId,
+            item_name: resolvedItem.itemName,
             quantity: requestedItem.quantity,
             nested_options: resolvedItem.nestedOptions
           },
           message: resolution.problems.join(" "),
-          modifier_groups: details.modifier_groups
+          modifier_groups: resolution.modifier_groups
         });
-      }
-    }
-
-    const itemIdsWithChoices = new Set();
-    for (const itemError of itemErrors) {
-      if (!itemError.modifier_groups?.length) {
-        continue;
-      }
-      const itemId = itemError.request?.item_id;
-      if (itemId && itemIdsWithChoices.has(itemId)) {
-        delete itemError.modifier_groups;
-      } else if (itemId) {
-        itemIdsWithChoices.add(itemId);
       }
     }
 
@@ -1245,16 +1541,10 @@ export function createDoorDashApp({
         items: preflight.items
       };
       if (!addInput.cartUuid) {
-        const cartList = await executeCli(
-          listCartsArgs({ storeId: addInput.storeId }),
-          {
-            project: (data) =>
-              projectWithContract(contracts.cartList, data)
-          }
-        );
-        const existingCart = cartList.carts.find(
-          (cart) => cart.cart_uuid
-        );
+        const activeCarts = await inspectActiveCarts(addInput.storeId);
+        const existingCart =
+          activeCarts.find((cart) => cart.items.length > 0) ||
+          activeCarts[0];
         if (existingCart) {
           if (existingCart.items.length === 0) {
             addInput = {
@@ -1378,12 +1668,6 @@ export function createDoorDashApp({
       const preview = await executeCli(previewArgs, {
         project: (data) => data
       });
-
-      if (preview?.success === false) {
-        throw new DoorDashCliError(
-          preview?.error_message || preview?.message || "Order preview failed."
-        );
-      }
 
       const projectedPreview = projectSignedPreview(preview, input);
       const previewContext = projectedPreview.submit_context;
@@ -1594,9 +1878,10 @@ export function createDoorDashApp({
     registerDoorDashTools(server, {
       authInfo,
       addCartItems,
-      getItemDetails: (input) => getItemDetails(input, authInfo),
+      getItemDetails,
       getMenu,
       previewOrder: (input) => previewOrder(input, authInfo),
+      reorder,
       invoke: (args, options) => invoke(args, options, authInfo),
       invokeAtDefaultAddress: (input, buildArgs) =>
         invokeAtDefaultAddress(input, buildArgs, authInfo),

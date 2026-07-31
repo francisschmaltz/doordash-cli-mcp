@@ -15,6 +15,9 @@ for chaining tools without copying the full response grammar into every tool
 definition. The server still validates each result against its strict internal
 contract before returning it.
 
+Open WebUI caches these schemas. Disconnect and reconnect the MCP integration
+after deploying a contract change, then start a new chat.
+
 Cart preflight failures are success-shaped `cart` payloads with `items: []`,
 complete `item_errors`, and `isError: true`; no write occurred. Partial
 DoorDash additions are different: successful lines remain in `items`, failed
@@ -47,6 +50,9 @@ The wire contract has one value per fact:
 - Checkout, tracking, and group-cart URLs appear only when DoorDash returned
   them.
 - IDs are strings, timestamps are ISO 8601, and image URLs stay URLs.
+- Restaurant stores, items, and cart lines retain authoritative `menu_id`
+  values when DoorDash supplies them. A cart also exposes top-level `menu_id`
+  when every line agrees.
 - Public tool inputs use strict snake_case fields. Older aliases are accepted
   only for runtime compatibility and are not advertised by `tools/list`.
 
@@ -99,7 +105,7 @@ The wire contract has one value per fact:
 | `order_list` | Orders, per-order item truncation, and optional top-level truncation |
 | `order_preview` | Current quote, pricing, ETA, optional tip/work data, and required `submit_context` |
 | `receipt` | Final order and pricing |
-| `reorder` | New cart |
+| `reorder` | Hydrated new cart and any item, quantity, or modifier differences from the source order |
 | `order_status` | Current order status and any upstream tracking URL |
 | `promotion_list` | `promotions` |
 | `promotion_mutation` | Required `cart_uuid` and `promo_code`; optional `message` |
@@ -145,13 +151,14 @@ The wire contract has one value per fact:
 }
 ```
 
-## Menu with modifiers
+## Menu and focused modifier lookup
 
 Use a canonical input such as
 `{"store_id":"928163","query":"Margherita Pizza"}`. The optional `query`
-filters the returned menu; it does not change DoorDash. If the user already
-named exact options, `add_cart_items` can resolve them. Use `get_item_details`
-to inspect unknown or nested choices.
+filters the returned menu; it does not change DoorDash. `get_menu` takes
+`store_id`, not `menu_id`; the response supplies `menu_id` for the next call.
+If the user already named exact options, `add_cart_items` can resolve them.
+Use `get_item_details` to inspect unknown or nested choices.
 
 ```json
 {
@@ -162,7 +169,7 @@ to inspect unknown or nested choices.
     },
     {
       "type": "text",
-      "text": "{\"schema\":\"doordash-cli\",\"version\":1,\"kind\":\"menu\",\"store\":{\"store_id\":\"928163\",\"name\":\"Example Pizza\"},\"menu_id\":\"1657275\",\"items\":[{\"item_id\":\"i_23266866023\",\"name\":\"Margherita Pizza\",\"description\":\"Tomato, mozzarella, and basil\",\"image_url\":\"https://images.example.test/items/pizza.jpg\",\"price\":18.99,\"available\":true,\"modifier_groups\":[{\"group_id\":\"size\",\"name\":\"Size\",\"min_selections\":1,\"max_selections\":1,\"options\":[{\"option_id\":\"large\",\"name\":\"Large\",\"price\":4,\"available\":true}]}]}],\"categories\":[{\"category_id\":\"pizza\",\"name\":\"Pizza\",\"item_ids\":[\"i_23266866023\"]}]}"
+      "text": "{\"schema\":\"doordash-cli\",\"version\":1,\"kind\":\"menu\",\"store\":{\"store_id\":\"928163\",\"menu_id\":\"1657275\",\"name\":\"Example Pizza\"},\"menu_id\":\"1657275\",\"items\":[{\"item_id\":\"i_23266866023\",\"menu_id\":\"1657275\",\"name\":\"Margherita Pizza\",\"description\":\"Tomato, mozzarella, and basil\",\"image_url\":\"https://images.example.test/items/pizza.jpg\",\"price\":18.99,\"available\":true}],\"categories\":[{\"category_id\":\"pizza\",\"name\":\"Pizza\",\"item_ids\":[\"i_23266866023\"]}]}"
     }
   ],
   "structuredContent": {
@@ -171,33 +178,19 @@ to inspect unknown or nested choices.
     "kind": "menu",
     "store": {
       "store_id": "928163",
+      "menu_id": "1657275",
       "name": "Example Pizza"
     },
     "menu_id": "1657275",
     "items": [
       {
         "item_id": "i_23266866023",
+        "menu_id": "1657275",
         "name": "Margherita Pizza",
         "description": "Tomato, mozzarella, and basil",
         "image_url": "https://images.example.test/items/pizza.jpg",
         "price": 18.99,
-        "available": true,
-        "modifier_groups": [
-          {
-            "group_id": "size",
-            "name": "Size",
-            "min_selections": 1,
-            "max_selections": 1,
-            "options": [
-              {
-                "option_id": "large",
-                "name": "Large",
-                "price": 4,
-                "available": true
-              }
-            ]
-          }
-        ]
+        "available": true
       }
     ],
     "categories": [
@@ -210,6 +203,21 @@ to inspect unknown or nested choices.
       }
     ]
   }
+}
+```
+
+For a bare restaurant item ID copied from order history, provide its known
+restaurant `menu_id`. On a large modifier tree, `option_queries` returns root
+choices plus bounded paths matching those names instead of the entire tree:
+
+```json
+{
+  "store_id": "928163",
+  "menu_id": "1657275",
+  "item_id": "9459662774",
+  "option_queries": [
+    "Ranch"
+  ]
 }
 ```
 
@@ -226,7 +234,14 @@ Every cart line must copy the exact `item_id` and `name`. Put customization in
       "name": "Margherita Pizza",
       "quantity": 1,
       "requested_options": [
-        "Large"
+        {
+          "name": "Large"
+        },
+        {
+          "name": "Ranch",
+          "quantity": 2,
+          "option_id": "o_ranch_sauce"
+        }
       ]
     }
   ]
@@ -240,11 +255,18 @@ Preflight runs before the additive cart write. `items: []`, `item_errors`, and
 the user already supplied, or ask the user. Then retry the complete batch once;
 never repeat unchanged input and never guess.
 
-An unavailable item says not to retry. Missing option IDs or modifier trees
-over 25 groups, 100 options, or five levels fail closed before a cart write;
-use DoorDash checkout instead of guessing.
-Cart errors include full modifier choices for at most two distinct items; call
-`get_item_details` for any remaining `item_id` named by the result.
+An unavailable item says not to retry. Malformed trees or selectable options
+without IDs fail closed before a cart write. Large trees are resolved
+internally; public errors return only relevant choices or ambiguity candidates.
+Call `get_item_details` with focused `option_queries` for any remaining item.
+
+If `{"name":"Ranch"}` matches both a sauce and a dressing branch, the error
+returns both candidates. Ask the user which one they mean, then preserve the
+requested count with
+`{"name":"Ranch","quantity":2,"option_id":"o_ranch_sauce"}`. Do not guess.
+Modifier quantities are capped at 100. If DoorDash reuses one `option_id`
+across sibling groups, use the exact qualified name returned by the error,
+such as `Sauce Ranch`, with that `option_id`.
 
 ```json
 {
@@ -625,6 +647,19 @@ DoorDash.
   }
 }
 ```
+
+## Safe reorder
+
+Call `reorder` once with `{"order_uuid":"order-789"}`. Before writing, the
+server loads the source order and checks active carts at the same store. A
+nonempty cart stops the operation instead of silently merging and doubling the
+items. Otherwise the server performs exactly one upstream reorder, hydrates the
+new cart with `show_cart`, and compares its lines with the source order.
+
+On success, use the verified hydrated cart as the starting point for
+customization. If hydration fails or the tool reports an unknown mutation
+outcome, perform its one inspection action; never call `reorder` again to find
+out what happened.
 
 ## Checkout link
 

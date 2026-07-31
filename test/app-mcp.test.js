@@ -116,8 +116,8 @@ test("purchase tools appear only for tokens with the checkbox enabled", async ()
   const purchaseNames = purchaseList.body.result.tools.map((tool) => tool.name);
   assert.equal(purchaseNames.length, 25);
   assert.ok(
-    JSON.stringify(purchaseList.body.result.tools).length < 55_000,
-    "purchase-enabled tools/list should stay below 55 KB"
+    JSON.stringify(purchaseList.body.result.tools).length < 60_000,
+    "purchase-enabled tools/list should stay below 60 KB"
   );
   assert.equal(purchaseNames.includes("list_payment_methods"), true);
   assert.equal(purchaseNames.includes("order_submit"), true);
@@ -378,11 +378,22 @@ test("cart tools instruct callers to satisfy required options and return checkou
   const genericDetailTool = response.body.result.tools.find(
     (tool) => tool.name === "get_item_details"
   );
+  const menuTool = response.body.result.tools.find(
+    (tool) => tool.name === "get_menu"
+  );
+  const reorderTool = response.body.result.tools.find(
+    (tool) => tool.name === "reorder"
+  );
 
   assert.ok(addTool);
   assert.match(addTool.description, /complete requested batch once/);
   assert.match(addTool.description, /exact item name/);
-  assert.match(addTool.description, /requested_options or nested_options/);
+  assert.match(
+    addTool.description,
+    /structured requested_options or nested_options/
+  );
+  assert.match(addTool.description, /option_id when a name is ambiguous/);
+  assert.match(addTool.description, /repeated choices with quantity/);
   assert.match(addTool.description, /every required modifier group/);
   assert.match(addTool.description, /preflight error makes no cart change/);
   assert.match(addTool.description, /partial-add result.*never resend/);
@@ -390,17 +401,56 @@ test("cart tools instruct callers to satisfy required options and return checkou
   assert.match(JSON.stringify(addTool.inputSchema), /"option_id"/);
   assert.ok(addTool.inputSchema.properties.items);
   assert.equal(addTool.inputSchema.properties.items.maxItems, 20);
+  const requestedOptionSchema =
+    addTool.inputSchema.properties.items.items.properties.requested_options
+      .items;
+  assert.equal(requestedOptionSchema.type, "object");
+  assert.equal(requestedOptionSchema.additionalProperties, false);
+  assert.deepEqual(requestedOptionSchema.required, ["name"]);
+  assert.equal(requestedOptionSchema.properties.name.type, "string");
+  assert.equal(requestedOptionSchema.properties.quantity.type, "integer");
+  assert.equal(requestedOptionSchema.properties.quantity.maximum, 100);
+  assert.equal(requestedOptionSchema.properties.option_id.type, "string");
+  const nestedOptionItem =
+    addTool.inputSchema.properties.items.items.properties.nested_options.items;
+  const nestedOptionSchema = nestedOptionItem.$ref
+    ? addTool.inputSchema.$defs[nestedOptionItem.$ref.split("/").at(-1)]
+    : nestedOptionItem;
+  assert.equal(nestedOptionSchema.properties.quantity.maximum, 100);
   assert.equal(
     JSON.stringify(addTool.inputSchema).includes('"requestedOptions"'),
     false
   );
   assert.ok(genericDetailTool);
   assert.match(genericDetailTool.description, /prefixed i_/);
+  assert.match(
+    genericDetailTool.description,
+    /bare IDs paired with a restaurant menu_id/
+  );
+  assert.match(genericDetailTool.description, /compact matching paths/);
   assert.ok(genericDetailTool.inputSchema.properties.menu_id);
+  assert.equal(
+    genericDetailTool.inputSchema.properties.option_queries.type,
+    "array"
+  );
+  assert.equal(
+    genericDetailTool.inputSchema.properties.option_queries.maxItems,
+    10
+  );
   assert.equal(
     "menuId" in genericDetailTool.inputSchema.properties,
     false
   );
+  assert.ok(menuTool);
+  assert.deepEqual(menuTool.inputSchema.required, ["store_id"]);
+  assert.equal("menu_id" in menuTool.inputSchema.properties, false);
+  assert.match(menuTool.description, /menu_id is an output/);
+  assert.ok(reorderTool);
+  assert.match(
+    reorderTool.description,
+    /refuses to merge into a nonempty same-store cart/
+  );
+  assert.match(reorderTool.description, /returns a verified hydrated cart/);
   for (const tool of [genericDetailTool, addTool]) {
     const modifierGroup = Object.values(tool.outputSchema.$defs || {}).find(
       (schema) =>
@@ -433,10 +483,13 @@ test("generic item details auto-routes restaurant IDs and resolves the menu", as
     securityStore: store,
     runCli: async (args) => {
       calls.push(args);
-      if (args[0] === "menu") {
+      if (args[0] === "store-details") {
         return cliResult({
-          menu_id: "menu-1",
-          items: []
+          store: {
+            store_id: "store-1",
+            store_name: "Ramen Shop",
+            menu_id: "menu-1"
+          }
         });
       }
       if (args[0] === "restaurant-item-details") {
@@ -494,7 +547,7 @@ test("generic item details auto-routes restaurant IDs and resolves the menu", as
   );
   assert.deepEqual(
     calls.map((args) => args[0]),
-    ["menu", "restaurant-item-details"]
+    ["store-details", "restaurant-item-details"]
   );
   assert.equal(
     calls[1][calls[1].indexOf("--item-id") + 1],
@@ -756,7 +809,12 @@ test("every emitted identifier is accepted by its consuming tool", async () => {
     set_default_address: ["address_id"],
     build_grocery_list: ["store_id"],
     find_items: ["store_id"],
-    get_item_details: ["store_id", "item_id", "menu_id"],
+    get_item_details: [
+      "store_id",
+      "item_id",
+      "menu_id",
+      "option_queries"
+    ],
     get_menu: ["store_id"],
     get_store_details: ["store_id"],
     add_cart_items: ["store_id", "menu_id", "cart_uuid"],
@@ -850,6 +908,7 @@ test("every emitted identifier is accepted by its consuming tool", async () => {
     "cartUuid",
     "itemId",
     "menuId",
+    "optionQueries",
     "previewToken",
     "requestedOptions",
     "selectedBudgetId",
@@ -1454,12 +1513,15 @@ test("add cart preflights variants and sends one complete DoorDash batch", async
           {
             item_id: "i_12901175286",
             name: "Spicy TanTan",
-            requested_options: ["Utensils"]
+            requested_options: [{ name: "Utensils" }]
           },
           {
             item_id: "i_12901175286",
             name: "Spicy TanTan",
-            requested_options: ["Utensils", "Sweet Corn"]
+            requested_options: [
+              { name: "Utensils" },
+              { name: "Sweet Corn" }
+            ]
           }
         ]
       }
@@ -1614,12 +1676,15 @@ test("partial cart errors preserve every candidate variant when DoorDash omits v
           {
             item_id: "i_12901175286",
             name: "Spicy TanTan",
-            requested_options: ["Utensils"]
+            requested_options: [{ name: "Utensils" }]
           },
           {
             item_id: "i_12901175286",
             name: "Spicy TanTan",
-            requested_options: ["Utensils", "Sweet Corn"]
+            requested_options: [
+              { name: "Utensils" },
+              { name: "Sweet Corn" }
+            ]
           }
         ]
       }
@@ -1652,7 +1717,7 @@ test("partial cart errors preserve every candidate variant when DoorDash omits v
   store.close();
 });
 
-test("add cart reports every modifier before writing when a choice is missing", async () => {
+test("add cart reports relevant modifier choices before writing", async () => {
   const store = new SecurityStore({ databasePath: ":memory:" });
   const token = store.createToken({
     name: "Open WebUI",
@@ -1718,7 +1783,7 @@ test("add cart reports every modifier before writing when a choice is missing", 
           {
             itemId: "i_12901175286",
             itemName: "Spicy TanTan",
-            requestedOptions: ["Imaginary Sauce"]
+            requestedOptions: [{ name: "Imaginary Sauce" }]
           }
         ]
       }
@@ -1733,7 +1798,7 @@ test("add cart reports every modifier before writing when a choice is missing", 
   assert.equal(
     response.body.result.structuredContent.item_errors[0]
       .modifier_groups.length,
-    2
+    1
   );
   assert.doesNotMatch(
     response.body.result.structuredContent.item_errors[0].message,
@@ -1755,10 +1820,7 @@ test("add cart reports every modifier before writing when a choice is missing", 
     response.body.result.content[0].text,
     /Utensils \(required; choose exactly 1\): Utensils : Yes \[o_yes\], Utensils : No \[o_no\]/
   );
-  assert.match(
-    response.body.result.content[0].text,
-    /Topping \(optional; omit for none\): Sweet Corn \[o_corn\]/
-  );
+  assert.doesNotMatch(response.body.result.content[0].text, /Sweet Corn/);
   assert.deepEqual(
     JSON.parse(response.body.result.content[1].text),
     response.body.result.structuredContent
@@ -1839,7 +1901,10 @@ test("negative Sweet Corn phrases are rejected instead of selecting corn", async
             {
               item_id: "i_12901175286",
               name: "Spicy TanTan",
-              requested_options: ["Utensils", negativeChoice]
+              requested_options: [
+                { name: "Utensils" },
+                { name: negativeChoice }
+              ]
             }
           ]
         }
@@ -1851,7 +1916,7 @@ test("negative Sweet Corn phrases are rejected instead of selecting corn", async
     assert.match(
       response.body.result.structuredContent.item_errors[0].message,
       new RegExp(
-        `${negativeChoice}.*does not exactly match a current option`
+        `${negativeChoice}.*does not exactly match a current available option`
       )
     );
   }
@@ -1869,12 +1934,15 @@ test("negative Sweet Corn phrases are rejected instead of selecting corn", async
           {
             item_id: "i_12901175286",
             name: "Spicy TanTan (with Sweet Corn)",
-            requested_options: ["Utensils", "Sweet Corn"]
+            requested_options: [
+              { name: "Utensils" },
+              { name: "Sweet Corn" }
+            ]
           },
           {
             item_id: "i_12901175286",
             name: "Spicy TanTan (without Sweet Corn)",
-            requested_options: ["Utensils"]
+            requested_options: [{ name: "Utensils" }]
           }
         ]
       }
@@ -1890,7 +1958,7 @@ test("negative Sweet Corn phrases are rejected instead of selecting corn", async
     customNames.body.result.structuredContent.item_errors.filter(
       (itemError) => itemError.modifier_groups?.length
     ).length,
-    1
+    0
   );
   for (const itemError of customNames.body.result.structuredContent
     .item_errors) {
@@ -1967,7 +2035,7 @@ test("unavailable modifier names are not offered as selectable hints", async () 
           {
             item_id: "i_ramen",
             name: "Spicy TanTan",
-            requested_options: ["Sweet Corn"]
+            requested_options: [{ name: "Sweet Corn" }]
           }
         ]
       }
@@ -1977,7 +2045,7 @@ test("unavailable modifier names are not offered as selectable hints", async () 
   assert.equal(response.body.result.isError, true);
   assert.match(
     response.body.result.structuredContent.item_errors[0].message,
-    /Sweet Corn.*does not exactly match a current option/
+    /Sweet Corn.*does not exactly match a current available option/
   );
   assert.deepEqual(
     calls.map((args) => args[0]),
@@ -2193,18 +2261,35 @@ test("large preflight batches stay complete, bounded, and small", async () => {
   store.close();
 });
 
-test("requested_options are rejected for non-restaurant items", async () => {
+test("bare requested_options IDs route through restaurant preflight", async () => {
   const store = new SecurityStore({ databasePath: ":memory:" });
   const token = store.createToken({
     name: "Open WebUI",
     allowPurchases: false
   });
-  let cliCalls = 0;
+  const calls = [];
   const { mcpHandler } = createTestApp({
     securityStore: store,
-    runCli: async () => {
-      cliCalls += 1;
-      return cliResult({});
+    runCli: async (args) => {
+      calls.push(args);
+      if (args[0] === "restaurant-item-details") {
+        return cliResult({
+          item: {
+            item_id: "retail-item",
+            name: "Sparkling Water",
+            extras: [
+              {
+                extra_id: "flavor",
+                title: "Flavor",
+                min_num_options: 0,
+                max_num_options: 1,
+                options: [{ option_id: "o_lime", name: "Lime" }]
+              }
+            ]
+          }
+        });
+      }
+      throw new Error(`Unexpected CLI call: ${args.join(" ")}`);
     }
   });
 
@@ -2221,7 +2306,7 @@ test("requested_options are rejected for non-restaurant items", async () => {
           {
             item_id: "retail-item",
             name: "Sparkling Water",
-            requested_options: ["Lime"]
+            requested_options: [{ name: "Grapefruit" }]
           }
         ]
       }
@@ -2231,9 +2316,11 @@ test("requested_options are rejected for non-restaurant items", async () => {
   assert.equal(response.body.result.isError, true);
   assert.match(
     response.body.result.structuredContent.item_errors[0].message,
-    /requested_options is supported only for i_-prefixed restaurant items/
+    /Grapefruit.*does not exactly match a current available option/
   );
-  assert.equal(cliCalls, 0);
+  assert.deepEqual(calls.map((args) => args[0]), [
+    "restaurant-item-details"
+  ]);
 
   await mcpHandler.close();
   store.close();
@@ -2385,7 +2472,7 @@ test("nested requested options require the complete parent selection path", asyn
           {
             item_id: "i_noodles",
             name: "Noodles",
-            requested_options: ["Extra Hot"]
+            requested_options: [{ name: "Extra Hot" }]
           }
         ]
       }
@@ -2395,7 +2482,7 @@ test("nested requested options require the complete parent selection path", asyn
   assert.equal(response.body.result.isError, true);
   assert.match(
     response.body.result.structuredContent.item_errors[0].message,
-    /Extra Hot.*nested under an unselected parent option/
+    /Extra Hot.*unselected parent choice/
   );
   assert.deepEqual(
     calls.map((args) => args[0]),

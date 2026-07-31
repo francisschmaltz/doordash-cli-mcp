@@ -314,6 +314,105 @@ test("order history omits unusable orders and caps nested items", () => {
   );
 });
 
+test("restaurant history item IDs are canonicalized from order_target", () => {
+  const projected = projectWithContract(contracts.orderList, {
+    orders: [
+      {
+        order_uuid: "restaurant-order",
+        order_target: { type: "RESTAURANT" },
+        store: { store_id: "store-1", name: "Chick-fil-A" },
+        items: [
+          {
+            item_id: 9459662774,
+            name: "Spicy Chicken Sandwich Deluxe Meal"
+          }
+        ]
+      },
+      {
+        order_uuid: "retail-order",
+        order_target: "RETAIL",
+        store: { store_id: "store-2", name: "Corner Market" },
+        items: [{ item_id: 9459662774, name: "Retail Item" }]
+      }
+    ]
+  });
+
+  assert.equal(projected.orders[0].items[0].item_id, "i_9459662774");
+  assert.equal(projected.orders[1].items[0].item_id, "9459662774");
+});
+
+test("menu_id survives store, item, cart, and reorder projections", () => {
+  const store = projectWithContract(contracts.storeDetails, {
+    store: { store_id: "store-1", name: "Example" },
+    menu_id: "menu-store"
+  });
+  const item = projectWithContract(contracts.itemDetails, {
+    store: { store_id: "store-1", name: "Example" },
+    menu_id: "menu-item",
+    item: { item_id: "i_item-1", name: "Combo" }
+  });
+  const cartPayload = {
+    success: true,
+    cart_uuid: "cart-1",
+    cart: {
+      id: "cart-1",
+      items: [
+        {
+          id: "line-1",
+          item_id: "i_item-1",
+          menu_id: "menu-cart",
+          name: "Combo"
+        },
+        {
+          id: "line-2",
+          item_id: "i_item-2",
+          menu_id: "menu-cart",
+          name: "Shake"
+        }
+      ]
+    }
+  };
+  const cart = projectWithContract(contracts.cart, cartPayload);
+  const reorder = projectWithContract(contracts.reorder, cartPayload);
+
+  assert.equal(store.store.menu_id, "menu-store");
+  assert.equal(item.store.menu_id, "menu-item");
+  assert.equal(item.item.menu_id, "menu-item");
+  for (const projected of [cart, reorder]) {
+    assert.equal(projected.menu_id, "menu-cart");
+    assert.deepEqual(
+      projected.items.map((entry) => entry.menu_id),
+      ["menu-cart", "menu-cart"]
+    );
+  }
+});
+
+test("cart-level menu_id is not guessed when line menu IDs conflict", () => {
+  const projected = projectWithContract(contracts.cart, {
+    cart_uuid: "cart-1",
+    items: [
+      {
+        id: "line-1",
+        item_id: "item-1",
+        menu_id: "menu-1",
+        name: "One"
+      },
+      {
+        id: "line-2",
+        item_id: "item-2",
+        menu_id: "menu-2",
+        name: "Two"
+      }
+    ]
+  });
+
+  assert.equal(projected.menu_id, undefined);
+  assert.deepEqual(
+    projected.items.map((entry) => entry.menu_id),
+    ["menu-1", "menu-2"]
+  );
+});
+
 test("modifier choices without option_id fail closed", () => {
   assert.throws(
     () =>
@@ -344,27 +443,140 @@ test("modifier choices without option_id fail closed", () => {
   );
 });
 
-test("oversized modifier trees fail before reaching a cart write", () => {
-  assert.throws(
-    () =>
-      projectWithContract(contracts.itemDetails, {
-        menu_id: "menu-1",
-        item: {
-          item_id: "item-1",
-          name: "Combo",
-          extras: [
+test("oversized modifier trees return root choices and matching paths", () => {
+  const nestedGroups = Array.from({ length: 820 }, (_, groupIndex) => ({
+    extra_id: `group-${groupIndex + 1}`,
+    title: `Choice ${groupIndex + 1}`,
+    options: Array.from(
+      { length: groupIndex === 0 ? 22 : 3 },
+      (_, optionIndex) => ({
+        option_id: `option-${groupIndex + 1}-${optionIndex + 1}`,
+        name:
+          groupIndex === 819 && optionIndex === 2
+            ? "Garden Herb Ranch Dressing"
+            : `Option ${groupIndex + 1}.${optionIndex + 1}`
+      })
+    )
+  }));
+  const projected = projectWithContract(contracts.itemDetails, {
+    menu_id: "menu-1",
+    mcp_option_queries: ["Ranch"],
+    item: {
+      item_id: "i_item-1",
+      name: "Combo",
+      extras: [
+        {
+          extra_id: "meal-root",
+          title: "Choose a Meal",
+          options: [
             {
-              extra_id: "toppings",
-              title: "Toppings",
-              options: Array.from({ length: 101 }, (_, index) => ({
-                option_id: `option-${index + 1}`,
-                name: `Option ${index + 1}`
-              }))
+              option_id: "meal-option",
+              name: "Meal",
+              extras: nestedGroups
             }
           ]
         }
-      }),
-    /safe MCP size limit/
+      ]
+    }
+  });
+
+  const rootOption = projected.item.modifier_groups[0].options[0];
+  assert.equal(rootOption.name, "Meal");
+  assert.equal(rootOption.modifier_groups.length, 1);
+  assert.equal(rootOption.modifier_groups[0].name, "Choice 820");
+  assert.deepEqual(
+    rootOption.modifier_groups[0].options.map((option) => option.name),
+    ["Garden Herb Ranch Dressing"]
+  );
+  assert.match(
+    projected.warnings.join(" "),
+    /omitted 819 modifier groups and 2478 options.*paths matching "ranch"/
+  );
+});
+
+test("modifier query results preserve ambiguous choices under distinct paths", () => {
+  const projected = projectWithContract(contracts.itemDetails, {
+    menu_id: "menu-1",
+    mcp_option_queries: ["Ranch"],
+    item: {
+      item_id: "i_combo",
+      name: "Combo",
+      extras: [
+        {
+          extra_id: "root",
+          title: "Choose a side",
+          options: [
+            {
+              option_id: "sauces",
+              name: "Sauces",
+              extras: [
+                {
+                  extra_id: "sauce-choice",
+                  title: "Sauce",
+                  options: [
+                    { option_id: "ranch-sauce", name: "Ranch Sauce" }
+                  ]
+                }
+              ]
+            },
+            {
+              option_id: "dressings",
+              name: "Dressings",
+              extras: [
+                {
+                  extra_id: "dressing-choice",
+                  title: "Dressing",
+                  options: [
+                    {
+                      option_id: "ranch-dressing",
+                      name: "Garden Herb Ranch Dressing"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  });
+
+  const paths = projected.item.modifier_groups[0].options.map((option) => ({
+    branch: option.name,
+    choice: option.modifier_groups[0].options[0].name
+  }));
+  assert.deepEqual(paths, [
+    { branch: "Sauces", choice: "Ranch Sauce" },
+    { branch: "Dressings", choice: "Garden Herb Ranch Dressing" }
+  ]);
+});
+
+test("modifier queries normalize ampersands and punctuation", () => {
+  const projected = projectWithContract(contracts.itemDetails, {
+    menu_id: "menu-1",
+    mcp_option_queries: ["Cookies and Cream"],
+    item: {
+      item_id: "i_combo",
+      name: "Combo",
+      extras: Array.from({ length: 26 }, (_, index) => ({
+        extra_id: `drink-${index}`,
+        title: `Drink ${index}`,
+        options: [
+          {
+            option_id: `option-${index}`,
+            name:
+              index === 25
+                ? "Cookies & Cream Milk Shake"
+                : `Drink Option ${index}`
+          }
+        ]
+      }))
+    }
+  });
+
+  assert.equal(
+    projected.item.modifier_groups[0].options[0].name,
+    "Cookies & Cream Milk Shake"
   );
 });
 
@@ -635,6 +847,50 @@ test("partial cart additions preserve successful items and required choices", ()
   assert.doesNotMatch(summary, /retrying add_cart_items once/);
 });
 
+test("cart modifier ambiguities preserve bounded deep candidate paths", () => {
+  let modifierGroups = [];
+  for (let depth = 9; depth >= 0; depth -= 1) {
+    modifierGroups = [
+      {
+        group_id: `group-${depth}`,
+        name: `Choice ${depth}`,
+        min_selections: 0,
+        max_selections: 1,
+        options: [
+          {
+            option_id: `option-${depth}`,
+            name: `Option ${depth}`,
+            ...(modifierGroups.length
+              ? { modifier_groups: modifierGroups }
+              : {})
+          }
+        ]
+      }
+    ];
+  }
+
+  const projected = projectWithContract(contracts.cart, {
+    cart_uuid: "cart-deep-path",
+    items: [],
+    item_errors: [
+      {
+        request: {
+          item_id: "meal-1",
+          item_name: "Meal"
+        },
+        message: "Choose one matching path.",
+        modifier_groups: modifierGroups
+      }
+    ]
+  });
+
+  let current = projected.item_errors[0].modifier_groups;
+  for (let depth = 0; depth < 10; depth += 1) {
+    assert.equal(current[0].group_id, `group-${depth}`);
+    current = current[0].options[0].modifier_groups || [];
+  }
+});
+
 test("cart errors collapse to one actionable result per requested line", () => {
   const projected = projectWithContract(contracts.cart, {
     cart_uuid: "cart-1",
@@ -828,6 +1084,18 @@ test("cart lists cap carts and lines with an actionable detail warning", () => {
   assert.match(
     projected.warnings.join(" "),
     /50 cart lines were omitted from list_carts\. Call show_cart for one cart's details\./
+  );
+});
+
+test("cart lists never imply omitted item contents mean empty", () => {
+  const projected = projectWithContract(contracts.cartList, {
+    carts: [{ cart_uuid: "cart-summary", store_id: "store-1" }]
+  });
+
+  assert.deepEqual(projected.carts[0].items, []);
+  assert.match(
+    projected.warnings.join(" "),
+    /summary omitted item contents.*show_cart.*treating.*empty/
   );
 });
 

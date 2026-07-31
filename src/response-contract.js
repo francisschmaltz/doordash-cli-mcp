@@ -67,6 +67,7 @@ const modifierGroupSchema = z.lazy(() =>
 export const itemSchema = z.lazy(() =>
   z.object({
     item_id: optionalString,
+    menu_id: optionalString,
     cart_item_id: optionalString,
     name: optionalString,
     description: optionalString,
@@ -88,6 +89,7 @@ export const itemSchema = z.lazy(() =>
 
 export const storeSchema = z.object({
   store_id: optionalString,
+  menu_id: optionalString,
   name: optionalString,
   image_url: optionalString,
   vertical: optionalString,
@@ -122,6 +124,7 @@ const paymentSchema = z.object({
 
 const cartFields = {
   cart_uuid: optionalString,
+  menu_id: optionalString,
   store: storeSchema.optional(),
   items: z.array(itemSchema),
   added_line_count: optionalNumber,
@@ -615,22 +618,40 @@ const MAX_MODIFIER_DEPTH = 5;
 const MAX_MODIFIER_GROUPS = 25;
 const MAX_MODIFIER_OPTIONS = 100;
 
+const DEFAULT_MODIFIER_LIMITS = {
+  depth: MAX_MODIFIER_DEPTH,
+  groups: MAX_MODIFIER_GROUPS,
+  options: MAX_MODIFIER_OPTIONS
+};
+
+const ITEM_DETAILS_MODIFIER_LIMITS = {
+  depth: 20,
+  groups: 10_000,
+  options: 50_000
+};
+
+const CART_ERROR_MODIFIER_LIMITS = {
+  ...DEFAULT_MODIFIER_LIMITS,
+  depth: ITEM_DETAILS_MODIFIER_LIMITS.depth
+};
+
 function modifierGroups(
   value,
   state = { groups: 0, options: 0 },
-  depth = 0
+  depth = 0,
+  limits = DEFAULT_MODIFIER_LIMITS
 ) {
   if (!Array.isArray(value) || value.length === 0) {
     return undefined;
   }
-  if (depth >= MAX_MODIFIER_DEPTH) {
+  if (depth >= limits.depth) {
     throw new UpstreamSchemaError(
       "DoorDash modifier data exceeded the safe MCP size limit. No cart change was made; use DoorDash checkout instead of retrying this item."
     );
   }
   assertObjectArray(value, "modifier groups");
   state.groups += value.length;
-  if (state.groups > MAX_MODIFIER_GROUPS) {
+  if (state.groups > limits.groups) {
     throw new UpstreamSchemaError(
       "DoorDash modifier data exceeded the safe MCP size limit. No cart change was made; use DoorDash checkout instead of retrying this item."
     );
@@ -650,7 +671,7 @@ function modifierGroups(
     }
     assertObjectArray(optionValues, "modifier options");
     state.options += optionValues.length;
-    if (state.options > MAX_MODIFIER_OPTIONS) {
+    if (state.options > limits.options) {
       throw new UpstreamSchemaError(
         "DoorDash modifier data exceeded the safe MCP size limit. No cart change was made; use DoorDash checkout instead of retrying this item."
       );
@@ -695,7 +716,8 @@ function modifierGroups(
               const nestedGroups = modifierGroups(
                 first(item.modifier_groups, item.extras, item.options),
                 state,
-                depth + 1
+                depth + 1,
+                limits
               );
               return [compactRecord([
                 [
@@ -738,23 +760,262 @@ function modifierGroups(
   });
 }
 
-function normalizeItem(
-  value,
-  {
-    cartLine = false,
-    includeModifierGroups = true,
-    includeSubstitutions = true
-  } = {}
-) {
-  const source = asObject(value) || {};
-  const nestedItem = asObject(source.item) || {};
-  const substitutions = first(source.substitutions, source.alternatives);
-  const rawOptions = first(
+function rawModifierGroups(source) {
+  return first(
     source.modifier_groups,
     source.extras,
     source.required_options,
     looksLikeModifierGroups(source.options) ? source.options : undefined
   );
+}
+
+function normalizedModifierText(value) {
+  return String(value || "")
+    .normalize("NFKD")
+    .toLowerCase()
+    .replace(/&/g, " and ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function modifierQueries(value) {
+  const values = Array.isArray(value) ? value : [value];
+  return [
+    ...new Set(
+      values
+        .map((entry) => normalizedModifierText(stringValue(entry)))
+        .filter(Boolean)
+    )
+  ];
+}
+
+function modifierTextMatches(value, queries) {
+  const text = normalizedModifierText(stringValue(value));
+  return Boolean(text && queries.some((query) => text.includes(query)));
+}
+
+function modifierNodeMatches(option, queries) {
+  return (
+    modifierTextMatches(option.name, queries) ||
+    (option.modifier_groups || []).some((group) =>
+      modifierGroupMatches(group, queries)
+    )
+  );
+}
+
+function modifierGroupMatches(group, queries) {
+  return (
+    modifierTextMatches(group.name, queries) ||
+    group.options.some((option) => modifierNodeMatches(option, queries))
+  );
+}
+
+function matchingModifierGroups(groups, queries) {
+  if (!queries.length) {
+    return [];
+  }
+  return groups.flatMap((group) => {
+    const groupMatches = modifierTextMatches(group.name, queries);
+    const options = group.options.flatMap((option) => {
+      const nested = matchingModifierGroups(
+        option.modifier_groups || [],
+        queries
+      );
+      if (
+        !groupMatches &&
+        !modifierTextMatches(option.name, queries) &&
+        nested.length === 0
+      ) {
+        return [];
+      }
+      const { modifier_groups: _modifierGroups, ...base } = option;
+      return [
+        {
+          ...base,
+          ...(nested.length ? { modifier_groups: nested } : {})
+        }
+      ];
+    });
+    return options.length ? [{ ...group, options }] : [];
+  });
+}
+
+function rootModifierChoices(groups, queries) {
+  return groups.map((group) => ({
+    ...group,
+    options: group.options.map((option) => {
+      const nested = matchingModifierGroups(
+        option.modifier_groups || [],
+        queries
+      );
+      const { modifier_groups: _modifierGroups, ...base } = option;
+      return {
+        ...base,
+        ...(nested.length ? { modifier_groups: nested } : {})
+      };
+    })
+  }));
+}
+
+function prioritizeModifierMatches(values, predicate) {
+  return values
+    .map((value, index) => ({ value, index, match: predicate(value) }))
+    .sort((left, right) =>
+      left.match === right.match
+        ? left.index - right.index
+        : left.match
+          ? -1
+          : 1
+    )
+    .map(({ value }) => value);
+}
+
+function limitModifierGroups(
+  groups,
+  queries,
+  state = { groups: 0, options: 0 }
+) {
+  const limited = [];
+  const prioritizedGroups = prioritizeModifierMatches(
+    groups,
+    (group) => modifierGroupMatches(group, queries)
+  );
+  for (const group of prioritizedGroups) {
+    if (state.groups >= MAX_MODIFIER_GROUPS) {
+      break;
+    }
+    if (group.options.length && state.options >= MAX_MODIFIER_OPTIONS) {
+      break;
+    }
+    state.groups += 1;
+    const options = [];
+    const prioritizedOptions = prioritizeModifierMatches(
+      group.options,
+      (option) => modifierNodeMatches(option, queries)
+    );
+    for (const option of prioritizedOptions) {
+      if (state.options >= MAX_MODIFIER_OPTIONS) {
+        break;
+      }
+      state.options += 1;
+      const nested = limitModifierGroups(
+        option.modifier_groups || [],
+        queries,
+        state
+      );
+      const { modifier_groups: _modifierGroups, ...base } = option;
+      options.push({
+        ...base,
+        ...(nested.length ? { modifier_groups: nested } : {})
+      });
+    }
+    limited.push({ ...group, options });
+  }
+  return limited;
+}
+
+function countModifierTree(groups) {
+  return groups.reduce(
+    (total, group) => {
+      total.groups += 1;
+      total.options += group.options.length;
+      for (const option of group.options) {
+        const nested = countModifierTree(option.modifier_groups || []);
+        total.groups += nested.groups;
+        total.options += nested.options;
+      }
+      return total;
+    },
+    { groups: 0, options: 0 }
+  );
+}
+
+export function compactModifierView(value, queryValue) {
+  const full = normalizeModifierGroupsForResolution(value);
+  const total = countModifierTree(full);
+  if (
+    total.groups <= MAX_MODIFIER_GROUPS &&
+    total.options <= MAX_MODIFIER_OPTIONS
+  ) {
+    return { groups: full.length ? full : undefined, total, returned: total };
+  }
+
+  const queries = modifierQueries(queryValue);
+  const candidates = rootModifierChoices(full, queries);
+  const groups = limitModifierGroups(candidates, queries);
+  return {
+    groups: groups.length ? groups : undefined,
+    total,
+    returned: countModifierTree(groups),
+    pruned: true
+  };
+}
+
+export function normalizeModifierGroupsForResolution(value) {
+  const source = asObject(value);
+  const item = asObject(source?.item) || source || {};
+  const rawGroups = Array.isArray(value) ? value : rawModifierGroups(item);
+  return (
+    modifierGroups(
+      rawGroups,
+      { groups: 0, options: 0 },
+      0,
+      ITEM_DETAILS_MODIFIER_LIMITS
+    ) || []
+  );
+}
+
+function isRestaurantOrderTarget(value) {
+  const source = asObject(value);
+  const target = stringValue(
+    value,
+    source?.type,
+    source?.name,
+    source?.vertical,
+    source?.business_vertical
+  )?.toLowerCase();
+  return Boolean(target && /(^|[_\s-])restaurant($|[_\s-])/.test(target));
+}
+
+function canonicalItemId(value, orderTarget) {
+  const itemId = idValue(value);
+  if (
+    itemId &&
+    /^\d+$/.test(itemId) &&
+    isRestaurantOrderTarget(orderTarget)
+  ) {
+    return `i_${itemId}`;
+  }
+  return itemId;
+}
+
+function rawItemMenuId(value) {
+  const source = asObject(value) || {};
+  const nestedItem = asObject(source.item) || {};
+  return idValue(
+    source.menu_id,
+    source.menuId,
+    source.menu?.menu_id,
+    source.menu?.id,
+    nestedItem.menu_id,
+    nestedItem.menuId
+  );
+}
+
+function normalizeItem(
+  value,
+  {
+    cartLine = false,
+    includeModifierGroups = true,
+    includeSubstitutions = true,
+    menuId,
+    orderTarget
+  } = {}
+) {
+  const source = asObject(value) || {};
+  const nestedItem = asObject(source.item) || {};
+  const substitutions = first(source.substitutions, source.alternatives);
+  const rawOptions = rawModifierGroups(source);
   const selectedOptions = normalizeSelectedOptions(
     first(
       source.selected_options,
@@ -768,13 +1029,20 @@ function normalizeItem(
   return compactRecord([
     [
       "item_id",
-      idValue(
-        source.item_id,
-        source.menu_item_id,
-        nestedItem.item_id,
-        nestedItem.id,
-        cartLine ? undefined : source.id
+      canonicalItemId(
+        first(
+          source.item_id,
+          source.menu_item_id,
+          nestedItem.item_id,
+          nestedItem.id,
+          cartLine ? undefined : source.id
+        ),
+        first(source.order_target, nestedItem.order_target, orderTarget)
       )
+    ],
+    [
+      "menu_id",
+      idValue(rawItemMenuId(source), menuId)
     ],
     [
       "cart_item_id",
@@ -867,7 +1135,9 @@ function normalizeItem(
         ? substitutions.map((entry) =>
             normalizeItem(entry, {
               includeModifierGroups,
-              includeSubstitutions: false
+              includeSubstitutions: false,
+              menuId,
+              orderTarget
             })
           )
         : undefined
@@ -913,7 +1183,10 @@ function fulfillmentOptions(source) {
   return values.length ? [...new Set(values)] : undefined;
 }
 
-function normalizeStore(value, { includeDiscovery = true } = {}) {
+function normalizeStore(
+  value,
+  { includeDiscovery = true, menuId } = {}
+) {
   const source = asObject(value) || {};
   const deliveryValue = {
     ...source,
@@ -922,6 +1195,16 @@ function normalizeStore(value, { includeDiscovery = true } = {}) {
   };
   return compactRecord([
     ["store_id", idValue(source.store_id, source.storeId, source.id)],
+    [
+      "menu_id",
+      idValue(
+        source.menu_id,
+        source.menuId,
+        source.menu?.menu_id,
+        source.menu?.id,
+        menuId
+      )
+    ],
     [
       "name",
       stringValue(source.name, source.store_name, source.business_name)
@@ -1094,30 +1377,54 @@ function normalizeCart(value, { itemLimit = 100 } = {}) {
     ...(asObject(wrapper.cart) || {})
   };
   const rawItems = Array.isArray(source.items) ? source.items : [];
-  const items = rawItems
-    .slice(0, itemLimit)
-    .map((entry) => normalizeItem(entry, { cartLine: true }));
+  const explicitMenuId = idValue(
+    source.menu_id,
+    source.menuId,
+    wrapper.menu_id,
+    wrapper.menuId
+  );
   const storeValue =
     asObject(source.store) ||
     (source.store_id || source.store_name
       ? {
           store_id: source.store_id,
           store_name: source.store_name,
-          image_url: source.store_image_url
+          image_url: source.store_image_url,
+          menu_id: explicitMenuId
         }
       : undefined);
+  const store = storeValue
+    ? normalizeStore(storeValue, {
+        includeDiscovery: false,
+        menuId: explicitMenuId
+      })
+    : undefined;
+  const contextualMenuId = explicitMenuId || store?.menu_id;
+  const items = rawItems
+    .slice(0, itemLimit)
+    .map((entry) =>
+      normalizeItem(entry, {
+        cartLine: true,
+        menuId: contextualMenuId
+      })
+    );
+  const rawLineMenuIds = rawItems.map(rawItemMenuId);
+  const firstLineMenuId = rawLineMenuIds[0];
+  const derivedLineMenuId =
+    rawLineMenuIds.length > 0 &&
+    firstLineMenuId &&
+    rawLineMenuIds.every((lineMenuId) => lineMenuId === firstLineMenuId)
+      ? firstLineMenuId
+      : undefined;
+  const menuId = contextualMenuId || derivedLineMenuId;
   const links = responseLinks(source);
   return compactRecord([
     [
       "cart_uuid",
       idValue(source.cart_uuid, source.uuid, source.id, value?.cart_uuid)
     ],
-    [
-      "store",
-      storeValue
-        ? normalizeStore(storeValue, { includeDiscovery: false })
-        : undefined
-    ],
+    ["menu_id", menuId],
+    ["store", store],
     ["items", items],
     ["items_truncation", truncation(rawItems.length, items.length)],
     [
@@ -1133,14 +1440,20 @@ function normalizeCart(value, { itemLimit = 100 } = {}) {
   ]);
 }
 
-function quoteItems(quote) {
+function quoteItems(quote, { menuId, orderTarget } = {}) {
   const orders = quote?.store_order_cart?.orders;
   if (!Array.isArray(orders)) {
     return undefined;
   }
   return orders.flatMap((order) =>
     Array.isArray(order.order_items)
-      ? order.order_items.map((entry) => normalizeItem(entry, { cartLine: true }))
+      ? order.order_items.map((entry) =>
+          normalizeItem(entry, {
+            cartLine: true,
+            menuId: idValue(order.menu_id, menuId),
+            orderTarget: first(order.order_target, orderTarget)
+          })
+        )
       : []
   );
 }
@@ -1158,7 +1471,25 @@ function normalizeOrder(value, options = {}) {
     ? previewQuote || sourceQuote
     : sourceQuote || previewQuote;
   const cart = asObject(quote?.store_order_cart);
-  const previewItems = quoteItems(previewQuote);
+  const orderTarget = first(
+    source.order_target,
+    source.orderTarget,
+    source.store?.order_target,
+    cart?.order_target,
+    cart?.store?.order_target,
+    options.preview?.order_target
+  );
+  const menuId = idValue(
+    source.menu_id,
+    source.menuId,
+    source.store?.menu_id,
+    source.store?.menuId,
+    cart?.menu_id,
+    cart?.menuId,
+    cart?.store?.menu_id,
+    options.preview?.menu_id
+  );
+  const previewItems = quoteItems(previewQuote, { menuId, orderTarget });
   const sourceItemAliases = [
     source.items,
     source.order_items,
@@ -1171,7 +1502,9 @@ function normalizeOrder(value, options = {}) {
   const itemsSource =
     options.preferPreview && Array.isArray(previewItems)
       ? previewItems
-      : nonEmptySourceItems || firstSourceItems || quoteItems(quote);
+      : nonEmptySourceItems ||
+        firstSourceItems ||
+        quoteItems(quote, { menuId, orderTarget });
   const itemLimit =
     Number.isInteger(options.itemLimit) && options.itemLimit >= 0
       ? options.itemLimit
@@ -1179,8 +1512,8 @@ function normalizeOrder(value, options = {}) {
   const items = Array.isArray(itemsSource)
     ? itemsSource.slice(0, itemLimit).map((entry) =>
         entry?.item_id || entry?.cart_item_id
-          ? normalizeItem(entry, { cartLine: true })
-          : normalizeItem(entry)
+          ? normalizeItem(entry, { cartLine: true, menuId, orderTarget })
+          : normalizeItem(entry, { menuId, orderTarget })
       )
     : undefined;
   const previewStore =
@@ -1195,7 +1528,9 @@ function normalizeOrder(value, options = {}) {
       ? {
           store_id: source.store_id,
           store_name: source.store_name,
-          image_url: source.store_image_url
+          image_url: source.store_image_url,
+          menu_id: menuId,
+          order_target: orderTarget
         }
       : undefined);
   const deliveryAvailability = first(
@@ -1307,7 +1642,10 @@ function normalizeOrder(value, options = {}) {
     [
       "store",
       storeValue
-        ? normalizeStore(storeValue, { includeDiscovery: false })
+        ? normalizeStore(storeValue, {
+            includeDiscovery: false,
+            menuId
+          })
         : undefined
     ],
     ["items", items],
@@ -1443,7 +1781,13 @@ function storeDetailsProject(data) {
   if (!source) {
     throw new UpstreamSchemaError("DoorDash returned invalid store details.");
   }
-  const store = normalizeStore(source.store || source);
+  const menuId = idValue(
+    source.menu_id,
+    source.menuId,
+    source.menu?.menu_id,
+    source.menu?.id
+  );
+  const store = normalizeStore(source.store || source, { menuId });
   if (!store.store_id) {
     throw new UpstreamSchemaError(
       "DoorDash store details did not contain the store_id needed for follow-up tools."
@@ -1457,6 +1801,7 @@ function menuProject(data) {
   if (!source) {
     throw new UpstreamSchemaError("DoorDash returned an invalid menu.");
   }
+  const menuId = idValue(source.menu_id, source.menuId);
   if (
     source.categories !== undefined &&
     source.categories !== null &&
@@ -1501,7 +1846,8 @@ function menuProject(data) {
     .map((entry) =>
       normalizeItem(entry, {
         includeModifierGroups: false,
-        includeSubstitutions: false
+        includeSubstitutions: false,
+        menuId
       })
     );
   const items = normalizedItems.filter((item) => item.item_id && item.name);
@@ -1531,7 +1877,6 @@ function menuProject(data) {
       `${categories.length - 50} menu categories were omitted. Use query to request the dish name directly.`
     );
   }
-  const menuId = idValue(source.menu_id, source.menuId);
   if (!menuId) {
     throw new UpstreamSchemaError(
       "DoorDash menu response did not contain menu_id."
@@ -1543,7 +1888,10 @@ function menuProject(data) {
       [
         "store",
         storeValue
-          ? normalizeStore(storeValue, { includeDiscovery: false })
+          ? normalizeStore(storeValue, {
+              includeDiscovery: false,
+              menuId
+            })
           : undefined
       ],
       ["menu_id", menuId],
@@ -1588,7 +1936,28 @@ function itemDetailsProject(data) {
   if (!source) {
     throw new UpstreamSchemaError("DoorDash returned invalid item details.");
   }
-  const item = normalizeItem(source.item || source);
+  const itemSource = asObject(source.item) || source;
+  const menuId = idValue(
+    source.menu_id,
+    source.menuId,
+    source.store?.menu_id,
+    source.store?.menuId,
+    itemSource.menu_id,
+    itemSource.menuId
+  );
+  const modifierProjection = compactModifierView(
+    rawModifierGroups(itemSource),
+    source.mcp_option_queries
+  );
+  const item = {
+    ...normalizeItem(itemSource, {
+      includeModifierGroups: false,
+      menuId
+    }),
+    ...(modifierProjection.groups
+      ? { modifier_groups: modifierProjection.groups }
+      : {})
+  };
   if (!item.item_id || !item.name) {
     throw new UpstreamSchemaError(
       "DoorDash item details did not contain item_id and name."
@@ -1599,8 +1968,21 @@ function itemDetailsProject(data) {
     (source.store_id || source.store_name
       ? { store_id: source.store_id, store_name: source.store_name }
       : undefined);
-  const menuId = idValue(source.menu_id, source.menuId);
   const warnings = warningList(source.warning);
+  if (modifierProjection.pruned) {
+    const omittedGroups =
+      modifierProjection.total.groups - modifierProjection.returned.groups;
+    const omittedOptions =
+      modifierProjection.total.options - modifierProjection.returned.options;
+    const queries = modifierQueries(source.mcp_option_queries);
+    warnings.push(
+      `This compact item-detail result omitted ${omittedGroups} modifier group${omittedGroups === 1 ? "" : "s"} and ${omittedOptions} option${omittedOptions === 1 ? "" : "s"}. ${
+        queries.length
+          ? `A bounded set of root choices and paths matching ${queries.map((query) => `"${query}"`).join(", ")} is shown; omitted choices may contain additional matches.`
+          : "Root choices are shown; call get_item_details again with option_queries for the requested choices."
+      }`
+    );
+  }
   if (!menuId) {
     warnings.push(
       "DoorDash did not return menu_id. This item cannot be sent to add_cart_items until a menu_id is available."
@@ -1612,7 +1994,10 @@ function itemDetailsProject(data) {
       [
         "store",
         storeValue
-          ? normalizeStore(storeValue, { includeDiscovery: false })
+          ? normalizeStore(storeValue, {
+              includeDiscovery: false,
+              menuId
+            })
           : undefined
       ],
       ["menu_id", menuId],
@@ -1714,9 +2099,10 @@ function groceryProject(data) {
     );
   }
   assertObjectArray(source.items, "grocery-list items");
+  const menuId = idValue(source.menu_id, source.menuId);
   const normalizedItems = source.items
     .slice(0, 25)
-    .map((entry) => normalizeItem(entry));
+    .map((entry) => normalizeItem(entry, { menuId }));
   const items = normalizedItems.filter((item) => item.item_id && item.name);
   const rawStores = Array.isArray(source.available_stores)
     ? source.available_stores
@@ -1735,9 +2121,9 @@ function groceryProject(data) {
     store_id: selectedStoreId,
     store_name: source.store_name,
     image_url: source.store_image_url,
+    menu_id: menuId,
     delivery_time: source.delivery_time
   });
-  const menuId = idValue(source.menu_id);
   const warnings = warningList(source.warning);
   if (items.length !== normalizedItems.length) {
     warnings.push("Grocery results without item_id or name were omitted.");
@@ -1806,7 +2192,10 @@ function normalizedCartItemError(entry) {
         sourceEntry.required_options,
         sourceEntry.modifier_groups,
         item.modifier_groups
-      )
+      ),
+      { groups: 0, options: 0 },
+      0,
+      CART_ERROR_MODIFIER_LIMITS
     )
   };
 }
@@ -2095,6 +2484,16 @@ function cartListProject(data) {
   if (carts.length !== normalizedCarts.length) {
     warnings.push("Carts without cart_uuid were omitted.");
   }
+  const cartsWithoutItemContents = source.carts.filter((entry) => {
+    const wrapper = asObject(entry) || {};
+    const cart = asObject(wrapper.cart) || wrapper;
+    return !Array.isArray(cart.items);
+  }).length;
+  if (cartsWithoutItemContents) {
+    warnings.push(
+      `${cartsWithoutItemContents} active cart summar${cartsWithoutItemContents === 1 ? "y omitted" : "ies omitted"} item contents. Call show_cart before treating any listed cart as empty.`
+    );
+  }
   const omittedItems = carts.reduce(
     (total, cart) => total + (cart.items_truncation?.omitted || 0),
     0
@@ -2133,10 +2532,23 @@ function cartListProject(data) {
 
 function operationError(source, fallback) {
   const message =
-    stringValue(source.error_message, source.fail_reason, source.message) ||
+    stringValue(
+      source.error_message,
+      source.fail_reason,
+      source.message,
+      source.error?.message,
+      source.error?.debug_message,
+      source.error?.debugMessage,
+      source.error
+    ) ||
     fallback;
   throw new DoorDashOperationError(message, {
-    code: stringValue(source.error_reason, source.code),
+    code: stringValue(
+      source.error_reason,
+      source.code,
+      source.error?.code,
+      source.error?.error_reason
+    ),
     details: source
   });
 }
@@ -2944,17 +3356,20 @@ const publicModifierGroupSchema = z.lazy(() =>
 
 const publicActionableItemSchema = z.looseObject({
   item_id: z.string(),
+  menu_id: optionalString,
   name: z.string()
 });
 
 const publicDetailedItemSchema = z.looseObject({
   item_id: z.string(),
+  menu_id: optionalString,
   name: z.string(),
   modifier_groups: z.array(publicModifierGroupSchema).optional()
 });
 
 const publicCartItemSchema = z.looseObject({
   item_id: optionalString,
+  menu_id: optionalString,
   cart_item_id: optionalString,
   name: optionalString,
   quantity: optionalNumber,
@@ -2963,6 +3378,7 @@ const publicCartItemSchema = z.looseObject({
 
 const publicFailedLineSchema = z.looseObject({
   item_id: optionalString,
+  menu_id: optionalString,
   name: optionalString,
   quantity: optionalNumber,
   selected_options: z.array(publicSelectedOptionSchema).optional()
@@ -2986,6 +3402,7 @@ const publicItemErrorSchema = z.looseObject({
 
 const publicStoreReferenceSchema = z.looseObject({
   store_id: z.string(),
+  menu_id: optionalString,
   name: optionalString
 });
 
@@ -3092,6 +3509,7 @@ function publicSuccessFields(kind) {
     case "cart":
       return {
         cart_uuid: optionalString,
+        menu_id: optionalString,
         items: z.array(publicCartItemSchema),
         items_truncation: truncationSchema.optional(),
         fulfillment: z.enum(["delivery", "pickup"]).optional(),
@@ -3104,6 +3522,7 @@ function publicSuccessFields(kind) {
         carts: z.array(
           z.looseObject({
             cart_uuid: z.string(),
+            menu_id: optionalString,
             items: z.array(publicCartItemSchema),
             items_truncation: truncationSchema.optional(),
             fulfillment: z.enum(["delivery", "pickup"]).optional()
@@ -3149,6 +3568,7 @@ function publicSuccessFields(kind) {
     case "reorder":
       return {
         cart_uuid: z.string(),
+        menu_id: optionalString,
         items: z.array(publicCartItemSchema),
         items_truncation: truncationSchema.optional(),
         fulfillment: z.enum(["delivery", "pickup"]).optional()
@@ -3393,6 +3813,10 @@ function recoveryFor(error, code) {
         : { tool: "list_carts", arguments: {} };
     case "REORDER_OUTCOME_UNKNOWN":
       return { tool: "list_carts", arguments: {} };
+    case "REORDER_HYDRATION_FAILED":
+      return cartUuid
+        ? { tool: "show_cart", arguments: { cart_uuid: cartUuid } }
+        : undefined;
     case "PROMO_MUTATION_OUTCOME_UNKNOWN":
       return cartUuid
         ? {
@@ -3415,6 +3839,13 @@ function recoveryFor(error, code) {
       return cartUuid
         ? { tool: "show_cart", arguments: { cart_uuid: cartUuid } }
         : undefined;
+    case "ACTIVE_CART_STATE_UNKNOWN":
+      return cartUuid
+        ? { tool: "show_cart", arguments: { cart_uuid: cartUuid } }
+        : {
+            tool: "list_carts",
+            arguments: storeId ? { store_id: storeId } : {}
+          };
     case "CART_WRITE_IN_PROGRESS":
       return {
         tool: "list_carts",
@@ -3482,6 +3913,25 @@ export function errorEnvelope(contract, error) {
 }
 
 export function projectWithContract(contract, data) {
+  const source = asObject(data);
+  const cartSource = asObject(source?.cart) || source;
+  const isTypedPartialCart = Boolean(
+    contract.kind === "cart" &&
+      Array.isArray(source?.item_errors) &&
+      source.item_errors.length > 0 &&
+      Array.isArray(cartSource?.items)
+  );
+  if (
+    contract.kind !== "raw_cli" &&
+    source &&
+    booleanValue(source.success) === false &&
+    !isTypedPartialCart
+  ) {
+    operationError(
+      source,
+      `DoorDash ${contract.kind.replaceAll("_", " ")} operation failed.`
+    );
+  }
   return validateResponse(contract, contract.project(data));
 }
 
