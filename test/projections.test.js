@@ -84,6 +84,22 @@ test("store search emits one display distance and one delivery range", () => {
   );
 });
 
+test("empty retail item search routes restaurant callers to get_menu", () => {
+  const projected = projectWithContract(contracts.itemSearch, {
+    success: true,
+    results: { "Chicken Sandwich Meal": [] },
+    message: "Found 0 items across 1 queries"
+  });
+
+  assert.deepEqual(projected.results, [
+    { query: "Chicken Sandwich Meal", items: [] }
+  ]);
+  assert.match(
+    projected.warnings.join(" "),
+    /restaurant.*get_menu.*do not retry find_items/i
+  );
+});
+
 test("pricing prefers the final total and classifies discounts once", () => {
   const projected = projectWithContract(contracts.receipt, {
     order_uuid: "order-1",
@@ -395,6 +411,22 @@ test("order history omits unusable orders and caps nested items", () => {
   );
 });
 
+test("public order history remains capped at 25 orders", () => {
+  const projected = projectWithContract(contracts.orderList, {
+    orders: Array.from({ length: 30 }, (_, index) => ({
+      order_uuid: `order-${index + 1}`,
+      status: "successful",
+      items: []
+    }))
+  });
+
+  assert.equal(projected.orders.length, 25);
+  assert.deepEqual(projected.truncation, {
+    returned: 25,
+    omitted: 5
+  });
+});
+
 test("restaurant history item IDs are canonicalized from order_target", () => {
   const projected = projectWithContract(contracts.orderList, {
     orders: [
@@ -492,6 +524,66 @@ test("cart-level menu_id is not guessed when line menu IDs conflict", () => {
     projected.items.map((entry) => entry.menu_id),
     ["menu-1", "menu-2"]
   );
+});
+
+test("cart projection rejects contextual menu_id conflicts with its lines", () => {
+  const item = {
+    id: "line-1",
+    item_id: "item-1",
+    menu_id: "menu-line",
+    name: "One"
+  };
+  for (const context of [
+    { menu_id: "menu-cart" },
+    {
+      store: {
+        store_id: "store-1",
+        menu_id: "menu-cart",
+        name: "Example"
+      }
+    }
+  ]) {
+    assert.throws(
+      () =>
+        projectWithContract(contracts.cart, {
+          cart_uuid: "cart-1",
+          ...context,
+          items: [item]
+        }),
+      /line menu_id values that conflict with the cart menu_id/i
+    );
+  }
+});
+
+test("line-derived menu_id backfills the cart store", () => {
+  const payload = {
+    cart_uuid: "cart-1",
+    cart: {
+      id: "cart-1",
+      store_id: "store-1",
+      store_name: "Example",
+      items: [
+        {
+          id: "line-1",
+          item_id: "item-1",
+          menu_id: "menu-cart",
+          name: "One"
+        },
+        {
+          id: "line-2",
+          item_id: "item-2",
+          menu_id: "menu-cart",
+          name: "Two"
+        }
+      ]
+    }
+  };
+
+  for (const contract of [contracts.cart, contracts.reorder]) {
+    const projected = projectWithContract(contract, payload);
+    assert.equal(projected.menu_id, "menu-cart");
+    assert.equal(projected.store.menu_id, "menu-cart");
+  }
 });
 
 test("modifier choices without option_id fail closed", () => {

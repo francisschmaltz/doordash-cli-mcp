@@ -443,8 +443,8 @@ test("cart tools instruct callers to satisfy required options and return checkou
   );
   assert.ok(menuTool);
   assert.deepEqual(menuTool.inputSchema.required, ["store_id"]);
-  assert.equal("menu_id" in menuTool.inputSchema.properties, false);
-  assert.match(menuTool.description, /menu_id is an output/);
+  assert.equal("menu_id" in menuTool.inputSchema.properties, true);
+  assert.match(menuTool.description, /authoritative response supplied menu_id/);
   assert.ok(reorderTool);
   assert.match(
     reorderTool.description,
@@ -933,6 +933,7 @@ test("snake-case IDs route through address, item, cart, and promo tools", async 
     allowPurchases: false
   });
   const calls = [];
+  let cartLineRemoved = false;
   const { mcpHandler } = createTestApp({
     securityStore: store,
     runCli: async (args) => {
@@ -969,6 +970,27 @@ test("snake-case IDs route through address, item, cart, and promo tools", async 
           }
         });
       }
+      if (args[0] === "cart" && args[1] === "show") {
+        return cliResult({
+          cart_uuid: "cart-1",
+          menu_id: "menu-1",
+          store: { store_id: "store-1", menu_id: "menu-1" },
+          items: cartLineRemoved
+            ? []
+            : [
+                {
+                  id: "line-1",
+                  item_id: "item-1",
+                  menu_id: "menu-1",
+                  name: "Item",
+                  quantity: 1
+                }
+              ]
+        });
+      }
+      if (args[0] === "cart" && args[1] === "remove-item") {
+        cartLineRemoved = true;
+      }
       return cliResult({
         success: true,
         message: "Updated."
@@ -997,7 +1019,8 @@ test("snake-case IDs route through address, item, cart, and promo tools", async 
       name: "remove_cart_item",
       arguments: {
         cart_uuid: "cart-1",
-        cart_item_id: "line-1"
+        cart_item_id: "line-1",
+        confirm_delete_without_replacement: true
       }
     },
     {
@@ -1046,6 +1069,7 @@ test("snake-case IDs route through address, item, cart, and promo tools", async 
       "--item-id",
       "item-1"
     ],
+    ["cart", "show", "--cart-uuid", "cart-1"],
     [
       "cart",
       "remove-item",
@@ -1054,6 +1078,7 @@ test("snake-case IDs route through address, item, cart, and promo tools", async 
       "--cart-item-id",
       "line-1"
     ],
+    ["cart", "show", "--cart-uuid", "cart-1"],
     [
       "promo",
       "apply",
@@ -2337,6 +2362,15 @@ test("retail nested option IDs are verified before cart add-items", async () => 
     securityStore: store,
     runCli: async (args) => {
       calls.push(args);
+      if (args[0] === "store-details") {
+        return cliResult({
+          success: true,
+          store: {
+            store_id: "retail-store",
+            business_vertical_id: 1
+          }
+        });
+      }
       if (args[0] === "item-details") {
         return cliResult({
           item: {
@@ -2395,7 +2429,10 @@ test("retail nested option IDs are verified before cart add-items", async () => 
   );
   assert.deepEqual(
     calls.map((args) => args.slice(0, 2)),
-    [["item-details", "--store-id"]]
+    [
+      ["store-details", "--store-id"],
+      ["item-details", "--store-id"]
+    ]
   );
   assert.equal(
     calls.some(
@@ -2502,6 +2539,14 @@ test("add cart preserves successful items when checkout link creation fails", as
   const { mcpHandler } = createTestApp({
     securityStore: store,
     runCli: async (args) => {
+      if (args[0] === "cart" && args[1] === "show") {
+        return cliResult({
+          cart_uuid: "cart-1",
+          menu_id: "menu-1",
+          store: { store_id: "store-1", menu_id: "menu-1" },
+          items: []
+        });
+      }
       if (args[0] === "cart" && args[1] === "add-items") {
         return cliResult({
           success: true,

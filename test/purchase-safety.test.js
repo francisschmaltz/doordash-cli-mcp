@@ -784,7 +784,8 @@ test("cart mutations cannot enter between submit revalidation and purchase", asy
     "remove_cart_item",
     {
       cart_uuid: "cart-locked",
-      cart_item_id: "line-1"
+      cart_item_id: "line-1",
+      confirm_delete_without_replacement: true
     },
     3
   );

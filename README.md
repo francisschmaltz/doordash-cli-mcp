@@ -186,30 +186,43 @@ and submissions use the account-wide default address.
 - `get_item_details`
 - `build_grocery_list`
 
+`find_items` searches grocery and retail catalogs only. A known restaurant
+`store_id` is rejected before any retail catalog call and directs the caller to
+`get_menu`; never retry `find_items` for that store.
+
 `search_restaurants` and `find_nearby_stores` always call `list_addresses` and
 use the coordinates of the account-wide default address. They do not accept a
 location override. The wrapper returns an error instead of guessing when
 DoorDash has no marked default or the default has no coordinates.
 
-`get_menu` accepts `store_id`, not `menu_id`; it returns the effective menu
-context for later item-detail and cart calls. Its optional `query` filters a
-restaurant menu to the requested dish name. If DoorDash's full-menu lookup
+`get_menu` requires `store_id`; it also accepts an optional authoritative
+`menu_id` copied from reorder or a cart so fallback results remain safe for
+later cart calls. Its optional `query` filters a restaurant menu to the
+requested dish name. If DoorDash's full-menu lookup
 fails, the wrapper recovers recent item IDs from bounded order history and
-verifies them through current restaurant item details. An exact-name query
-checks at most five historical matches and is not an exhaustive menu search;
+verifies them through current restaurant item details. A dish-name query only
+accepts the same normalized dish name, checks at most five historical matches,
+and is not an exhaustive menu search;
 without one, the fallback returns at most five and explicitly warns that it is
-not the complete menu.
+not the complete menu. Recovery also requires one authoritative `menu_id` for
+the returned items. If that context is unavailable, or bounded history has no
+current exact-name match, the call fails closed. Do not use `find_items` or
+substitute a related spicy, deluxe, grilled, or other historical item; continue
+in the DoorDash app or website.
 `get_item_details` routes `i_`-prefixed IDs, plus bare historical item IDs
 paired with a restaurant `menu_id`, through the restaurant modifier endpoint.
 For an `i_` ID with no returned menu ID, the wrapper uses `store_id` as the
-restaurant menu context. Other item IDs use grocery or retail details. On a large modifier tree, pass
+endpoint's internal lookup context but does not publish it as `menu_id`; cart
+calls still require an authoritative menu ID. Other item IDs use grocery or
+retail details. On a large modifier tree, pass
 `option_queries` such as `["Ranch"]` to receive root choices plus compact
 matching paths instead of dumping the entire tree.
 When the full-menu endpoint succeeds, `get_menu` returns at most 50 items
 without `query` and tells the caller to retry with the dish name when more were
-omitted.
-A zero-match query says not to repeat it unchanged: try one broader dish name
-or inspect the capped menu once without a query.
+omitted. A zero-match query on that successful menu says not to repeat it
+unchanged: try one broader dish name or inspect the capped menu once without a
+query. That broader-search advice does not apply when catalog recovery failed
+closed.
 
 ### Carts
 
@@ -284,6 +297,16 @@ duplicating items. Inspect it, then return its checkout link when it already
 matches, explicitly extend it using its `cart_uuid`, or ask whether to replace
 it. `delete_cart` requires the exact confirmation `"DELETE CART"` after the
 user chooses replacement.
+
+`remove_cart_item` also fails closed. For a replacement, first add and verify
+the new line, then pass its `cart_item_id` as `replacement_cart_item_id`; the
+tool verifies that both the old and replacement lines exist before removing
+anything. For a true deletion with no replacement, pass
+`confirm_delete_without_replacement: true` instead. Provide exactly one of
+those proofs. On success, the tool returns a freshly hydrated cart confirming
+that the old line is gone and, for a replacement, the new line remains. If the
+mutation or hydration outcome is unknown, follow the returned one-time
+`show_cart` action and do not retry the removal.
 
 When extending a `cart_uuid`, omit `fulfillment` to preserve its current mode,
 or copy `show_cart.fulfillment` when the user explicitly chose delivery or

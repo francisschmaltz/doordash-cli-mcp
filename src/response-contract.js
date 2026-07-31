@@ -1429,6 +1429,17 @@ function normalizeCart(value, { itemLimit = 100 } = {}) {
       })
     : undefined;
   const contextualMenuId = explicitMenuId || store?.menu_id;
+  const rawLineMenuIds = rawItems.map(rawItemMenuId);
+  if (
+    contextualMenuId &&
+    rawLineMenuIds.some(
+      (lineMenuId) => lineMenuId && lineMenuId !== contextualMenuId
+    )
+  ) {
+    throw new UpstreamSchemaError(
+      "DoorDash cart response contained line menu_id values that conflict with the cart menu_id."
+    );
+  }
   const items = rawItems
     .slice(0, itemLimit)
     .map((entry) =>
@@ -1437,7 +1448,6 @@ function normalizeCart(value, { itemLimit = 100 } = {}) {
         menuId: contextualMenuId
       })
     );
-  const rawLineMenuIds = rawItems.map(rawItemMenuId);
   const firstLineMenuId = rawLineMenuIds[0];
   const derivedLineMenuId =
     rawLineMenuIds.length > 0 &&
@@ -1446,6 +1456,10 @@ function normalizeCart(value, { itemLimit = 100 } = {}) {
       ? firstLineMenuId
       : undefined;
   const menuId = contextualMenuId || derivedLineMenuId;
+  const projectedStore =
+    store && derivedLineMenuId && !contextualMenuId
+      ? { ...store, menu_id: derivedLineMenuId }
+      : store;
   const links = responseLinks(source);
   return compactRecord([
     [
@@ -1453,7 +1467,7 @@ function normalizeCart(value, { itemLimit = 100 } = {}) {
       idValue(source.cart_uuid, source.uuid, source.id, value?.cart_uuid)
     ],
     ["menu_id", menuId],
-    ["store", store],
+    ["store", projectedStore],
     ["items", items],
     ["items_truncation", truncation(rawItems.length, items.length)],
     [
@@ -2129,6 +2143,11 @@ function itemSearchProject(data) {
       `${omittedItems} item-search result${omittedItems === 1 ? "" : "s"} without item_id or name ${omittedItems === 1 ? "was" : "were"} omitted.`
     );
   }
+  if (results.every((group) => group.items.length === 0)) {
+    warnings.push(
+      "No grocery or retail products matched. If this is a restaurant, call get_menu with the same store_id and a dish-name query; do not retry find_items unchanged."
+    );
+  }
   return card(
     "item_search",
     compactRecord([
@@ -2668,7 +2687,7 @@ function checkoutProject(data) {
   );
 }
 
-function orderListProject(data) {
+function orderListProject(data, { orderLimit = 25 } = {}) {
   const source = asObject(data);
   if (!source || !Array.isArray(source.orders)) {
     throw new UpstreamSchemaError(
@@ -2677,7 +2696,7 @@ function orderListProject(data) {
   }
   assertObjectArray(source.orders, "order-history response");
   const normalizedOrders = source.orders
-    .slice(0, 25)
+    .slice(0, orderLimit)
     .map((entry) => normalizeOrder(entry, { itemLimit: 10 }));
   const orders = normalizedOrders.filter((order) => order.order_uuid);
   const warnings = warningList(source.warning);
@@ -3704,6 +3723,11 @@ export const contracts = {
   rawCli: defineContract("raw_cli", rawCliProject)
 };
 
+const orderHistoryRecoveryContract = defineContract(
+  "order_list",
+  (data) => orderListProject(data, { orderLimit: 100 })
+);
+
 const toolContracts = {
   list_addresses: contracts.addresses,
   set_default_address: contracts.addressUpdate,
@@ -3718,7 +3742,7 @@ const toolContracts = {
   add_cart_items: contracts.cart,
   delete_cart: contracts.cartMutation,
   list_carts: contracts.cartList,
-  remove_cart_item: contracts.cartMutation,
+  remove_cart_item: contracts.cart,
   show_cart: contracts.cart,
   create_checkout_link: contracts.checkoutLink,
   list_orders: contracts.orderList,
@@ -3849,6 +3873,7 @@ function recoveryFor(error, code) {
   const cartUuid = detailValue(error, "cart_uuid", "cartUuid");
   const orderUuid = detailValue(error, "order_uuid", "orderUuid");
   const storeId = detailValue(error, "store_id", "storeId");
+  const query = detailValue(error, "query");
   const stateScope = detailValue(error, "state_scope", "stateScope");
   const previewArguments = detailObject(
     error,
@@ -3869,6 +3894,12 @@ function recoveryFor(error, code) {
       return cartUuid
         ? { tool: "show_cart", arguments: { cart_uuid: cartUuid } }
         : { tool: "list_carts", arguments: {} };
+    case "CART_LINE_NOT_FOUND":
+    case "REPLACEMENT_LINE_NOT_FOUND":
+    case "CART_REMOVAL_HYDRATION_FAILED":
+      return cartUuid
+        ? { tool: "show_cart", arguments: { cart_uuid: cartUuid } }
+        : undefined;
     case "REORDER_OUTCOME_UNKNOWN":
       return { tool: "list_carts", arguments: {} };
     case "REORDER_HYDRATION_FAILED":
@@ -3939,6 +3970,13 @@ function recoveryFor(error, code) {
     case "DEFAULT_ADDRESS_MISSING":
     case "DEFAULT_ADDRESS_COORDINATES_MISSING":
       return { tool: "list_addresses", arguments: {} };
+    case "RESTAURANT_REQUIRES_MENU":
+      return storeId && query
+        ? {
+            tool: "get_menu",
+            arguments: { store_id: storeId, query }
+          }
+        : undefined;
     case "AGENTIC_RESTRICTED_ITEM_NOT_ALLOWED":
       return cartUuid
         ? {
@@ -3991,6 +4029,10 @@ export function projectWithContract(contract, data) {
     );
   }
   return validateResponse(contract, contract.project(data));
+}
+
+export function projectOrderHistoryForRecovery(data) {
+  return projectWithContract(orderHistoryRecoveryContract, data);
 }
 
 function dollarText(value) {

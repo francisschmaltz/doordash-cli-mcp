@@ -84,6 +84,19 @@ test("unknown mutation outcomes return one concrete inspection action", async (t
           items: []
         });
       }
+      if (args[0] === "cart" && args[1] === "show") {
+        return cliResult({
+          cart_uuid: "cart-1",
+          items: [
+            {
+              id: "line-1",
+              item_id: "item-1",
+              name: "Meal",
+              quantity: 1
+            }
+          ]
+        });
+      }
       throw new Error("Connection closed before confirmation.");
     }
   });
@@ -104,7 +117,8 @@ test("unknown mutation outcomes return one concrete inspection action", async (t
       name: "remove_cart_item",
       args: {
         cart_uuid: "cart-1",
-        cart_item_id: "line-1"
+        cart_item_id: "line-1",
+        confirm_delete_without_replacement: true
       },
       code: "CART_MUTATION_OUTCOME_UNKNOWN",
       recovery_tool: "show_cart",

@@ -72,7 +72,7 @@ The wire contract has one value per fact:
 | `add_cart_items` | `cart` |
 | `delete_cart` | `cart_mutation` |
 | `list_carts` | `cart_list` |
-| `remove_cart_item` | `cart_mutation` |
+| `remove_cart_item` | `cart` |
 | `show_cart` | `cart` |
 | `create_checkout_link` | `checkout_link` |
 | `list_orders` | `order_list` |
@@ -153,15 +153,26 @@ The wire contract has one value per fact:
 
 ## Menu and focused modifier lookup
 
+`find_items` searches grocery and retail catalogs only. A known restaurant
+`store_id` is rejected before any retail catalog call and directs the caller to
+`get_menu`; never retry `find_items` for that store.
+
 Use a canonical input such as
 `{"store_id":"928163","query":"Margherita Pizza"}`. The optional `query`
 filters the returned menu; it does not change DoorDash. `get_menu` takes
-`store_id`, not `menu_id`; the response supplies the effective menu context for
-the next call. If the full-menu endpoint fails, an exact-name query can recover
-matching historical item IDs and verify them through current item details. It
-checks at most five matches from bounded recent history and is not exhaustive.
-An unfiltered fallback returns at most five verified recent items and warns
-that the result is not a complete menu.
+`store_id`; when reorder or a cart already supplied an authoritative
+`menu_id`, pass it too so fallback output preserves that context. The response
+supplies the effective menu context for the next call. If the full-menu endpoint
+fails, a dish-name query can recover only the same normalized historical dish
+name and verify it through current item details. It checks at most five matches
+from bounded recent history and is not exhaustive; related spicy, deluxe, or
+grilled items are not substitutes.
+If no current exact-name history match exists, the call fails closed with
+`RESTAURANT_CATALOG_UNAVAILABLE`; do not broaden the history match, call
+`find_items`, or substitute another dish. Continue in the DoorDash app or
+website. Recovery also fails closed when the returned items do not share one
+authoritative `menu_id`. An unfiltered fallback returns at most five verified
+recent items and warns that the result is not a complete menu.
 If the user already named exact options, `add_cart_items` can resolve them.
 Use `get_item_details` to inspect unknown or nested choices.
 
@@ -212,8 +223,10 @@ Use `get_item_details` to inspect unknown or nested choices.
 ```
 
 For an `i_` restaurant item ID copied from order history, `menu_id` may be
-omitted; the server uses `store_id` as the restaurant menu context when
-DoorDash supplies no separate menu ID. On a large modifier tree,
+omitted; the server may use `store_id` only as the endpoint's internal lookup
+context. If DoorDash supplies no separate menu ID, the public response omits
+`menu_id` and cannot be handed to a cart call until an authoritative one is
+available. On a large modifier tree,
 `option_queries` returns root choices plus bounded paths matching those names
 instead of the entire tree:
 
@@ -447,6 +460,74 @@ lists every possible request line and its selections:
 
 Call `show_cart`, compare these candidates with the actual cart, and add only a
 variant proven missing. Never resend the original batch.
+
+## Safe cart-line removal
+
+For a replacement, add and verify the new line first. Then pass the old line's
+`cart_item_id` plus the new line's `cart_item_id` as
+`replacement_cart_item_id`:
+
+```json
+{
+  "cart_uuid": "cart-123",
+  "cart_item_id": "line-old",
+  "replacement_cart_item_id": "line-new"
+}
+```
+
+The server verifies both lines before the removal and hydrates the cart again
+afterward. Success returns the remaining `cart`, not a `cart_mutation` receipt:
+
+```json
+{
+  "content": [
+    {
+      "type": "text",
+      "text": "1 cart line at Example Pizza."
+    },
+    {
+      "type": "text",
+      "text": "{\"schema\":\"doordash-cli\",\"version\":1,\"kind\":\"cart\",\"cart_uuid\":\"cart-123\",\"menu_id\":\"1657275\",\"store\":{\"store_id\":\"928163\",\"menu_id\":\"1657275\",\"name\":\"Example Pizza\"},\"items\":[{\"item_id\":\"i_987654321\",\"menu_id\":\"1657275\",\"cart_item_id\":\"line-new\",\"name\":\"Replacement Pizza\",\"quantity\":1}]}"
+    }
+  ],
+  "structuredContent": {
+    "schema": "doordash-cli",
+    "version": 1,
+    "kind": "cart",
+    "cart_uuid": "cart-123",
+    "menu_id": "1657275",
+    "store": {
+      "store_id": "928163",
+      "menu_id": "1657275",
+      "name": "Example Pizza"
+    },
+    "items": [
+      {
+        "item_id": "i_987654321",
+        "menu_id": "1657275",
+        "cart_item_id": "line-new",
+        "name": "Replacement Pizza",
+        "quantity": 1
+      }
+    ]
+  }
+}
+```
+
+For a true deletion with no replacement, explicitly pass:
+
+```json
+{
+  "cart_uuid": "cart-123",
+  "cart_item_id": "line-old",
+  "confirm_delete_without_replacement": true
+}
+```
+
+Provide exactly one of `replacement_cart_item_id` or
+`confirm_delete_without_replacement: true`. Never use the deletion confirmation
+to bypass replacement proof. If the mutation or hydration result is unknown,
+follow the returned one-time `show_cart` recovery and do not retry the removal.
 
 ## Order preview
 

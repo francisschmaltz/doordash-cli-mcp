@@ -17,6 +17,7 @@ import { createTokenVerifier } from "./auth.js";
 import {
   addCartItemsArgs,
   checkoutLinkArgs,
+  findItemsArgs,
   itemDetailsArgs,
   listAddressesArgs,
   listCartsArgs,
@@ -26,6 +27,7 @@ import {
   orderStatusArgs,
   previewOrderArgs,
   receiptArgs,
+  removeCartItemArgs,
   restaurantItemDetailsArgs,
   reorderArgs,
   showCartArgs,
@@ -43,6 +45,7 @@ import {
   contracts,
   errorEnvelope,
   normalizeModifierGroupsForResolution,
+  projectOrderHistoryForRecovery,
   projectWithContract,
   toToolResult
 } from "./response-contract.js";
@@ -56,7 +59,7 @@ const PUBLIC_DIR = path.resolve(SOURCE_DIR, "..", "public");
 const LOGIN_PATH = path.join(PUBLIC_DIR, "login.html");
 const LOGIN_SCRIPT_PATH = path.join(PUBLIC_DIR, "login.js");
 const STYLES_PATH = path.join(PUBLIC_DIR, "styles.css");
-const SERVER_VERSION = "0.5.1";
+const SERVER_VERSION = "0.5.3";
 const TERMINAL_ORDER_STATUSES = new Set([
   "successful",
   "action_required",
@@ -356,6 +359,58 @@ function returnedRestaurantMenuId(data) {
   return undefined;
 }
 
+function authoritativeMenuIdForStore(storeId, menuId) {
+  const normalizedStoreId = String(storeId || "").trim();
+  const normalizedMenuId = String(menuId || "").trim();
+  if (
+    !normalizedMenuId ||
+    (normalizedStoreId && normalizedMenuId === normalizedStoreId)
+  ) {
+    return undefined;
+  }
+  return normalizedMenuId;
+}
+
+function rawStoreIsRestaurant(data) {
+  const source =
+    data && typeof data === "object" && !Array.isArray(data) ? data : {};
+  const store = source.store || source;
+  const target = normalizedChoiceText(
+    store.order_target ||
+      store.vertical ||
+      store.business_vertical ||
+      ""
+  );
+  const verticalId =
+    store.business_vertical_id ?? store.businessVerticalId;
+  const hasVerticalId =
+    verticalId !== undefined &&
+    verticalId !== null &&
+    String(verticalId).trim() !== "";
+  return (
+    (hasVerticalId && Number(verticalId) === 0) ||
+    target.split(" ").includes("restaurant")
+  );
+}
+
+function restaurantHistoryNameMatchesQuery(itemName, query, storeName) {
+  const normalizedItem = normalizedChoiceText(itemName);
+  const normalizedQuery = normalizedChoiceText(query);
+  const normalizedStore = normalizedChoiceText(storeName);
+  if (!normalizedItem || !normalizedQuery) {
+    return false;
+  }
+  const withoutStorePrefix = (value) =>
+    normalizedStore && value.startsWith(`${normalizedStore} `)
+      ? value.slice(normalizedStore.length + 1)
+      : value;
+  return (
+    normalizedItem === normalizedQuery ||
+    withoutStorePrefix(normalizedItem) ===
+      withoutStorePrefix(normalizedQuery)
+  );
+}
+
 function rawItemDetails(data) {
   const source =
     data && typeof data === "object" && !Array.isArray(data)
@@ -497,6 +552,77 @@ function selectedOptionsComparisonKey(options) {
   return JSON.stringify(normalized);
 }
 
+function comparableOptionId(value) {
+  return String(value || "").replace(/^o_/, "");
+}
+
+function selectedOptionMatches(source, current) {
+  const sourceId = comparableOptionId(source.option_id);
+  const currentId = comparableOptionId(current.option_id);
+  const sourceName = normalizedChoiceText(source.option_name);
+  const currentName = normalizedChoiceText(current.option_name);
+  const sourceGroup = normalizedChoiceText(source.group_name);
+  const currentGroup = normalizedChoiceText(current.group_name);
+  const sameIdentity =
+    sourceId && currentId
+      ? sourceId === currentId
+      : Boolean(sourceName && sourceName === currentName);
+  if (!sameIdentity) {
+    return false;
+  }
+  if (sourceGroup && sourceGroup !== currentGroup) {
+    return false;
+  }
+  if (
+    Number(source.quantity ?? 1) !== Number(current.quantity ?? 1)
+  ) {
+    return false;
+  }
+  return selectedOptionsContain(
+    source.options,
+    current.options
+  );
+}
+
+function selectedOptionsContain(sourceOptions, currentOptions) {
+  const source = Array.isArray(sourceOptions) ? sourceOptions : [];
+  const current = Array.isArray(currentOptions) ? currentOptions : [];
+  if (source.length > current.length) {
+    return false;
+  }
+
+  // IDs and names can repeat across modifier groups. Consume each current
+  // option once instead of letting one selection satisfy several source paths.
+  const currentMatches = new Array(current.length).fill(-1);
+  const assign = (sourceIndex, visited) => {
+    for (
+      let currentIndex = 0;
+      currentIndex < current.length;
+      currentIndex += 1
+    ) {
+      if (
+        visited.has(currentIndex) ||
+        !selectedOptionMatches(source[sourceIndex], current[currentIndex])
+      ) {
+        continue;
+      }
+      visited.add(currentIndex);
+      if (
+        currentMatches[currentIndex] === -1 ||
+        assign(currentMatches[currentIndex], visited)
+      ) {
+        currentMatches[currentIndex] = sourceIndex;
+        return true;
+      }
+    }
+    return false;
+  };
+
+  return source.every((_, sourceIndex) =>
+    assign(sourceIndex, new Set())
+  );
+}
+
 function itemComparisonSummary(items) {
   const summary = new Map();
   for (const item of items) {
@@ -521,22 +647,134 @@ function itemComparisonSummary(items) {
   return summary;
 }
 
-function variantSummariesMatch(left, right) {
-  const leftTotal = [...left.values()].reduce(
+function variantSummariesMatch(sourceVariants, currentVariants) {
+  const sourceTotal = [...sourceVariants.values()].reduce(
     (total, quantity) => total + quantity,
     0
   );
-  const rightTotal = [...right.values()].reduce(
+  const currentTotal = [...currentVariants.values()].reduce(
     (total, quantity) => total + quantity,
     0
   );
-  return (
-    left.size === right.size &&
-    [...left].every(([variant, quantity]) =>
-      right.has(variant) &&
-      quantity * rightTotal === right.get(variant) * leftTotal
-    )
+  const source = [...sourceVariants].map(([variant, quantity]) => ({
+    options: JSON.parse(variant),
+    quantity
+  }));
+  const current = [...currentVariants].map(([variant, quantity]) => ({
+    options: JSON.parse(variant),
+    quantity
+  }));
+  const compatible = (sourceVariant, currentVariant) =>
+    selectedOptionsContain(
+      sourceVariant.options,
+      currentVariant.options
+    );
+
+  if (
+    source.length === 0 ||
+    current.length === 0 ||
+    source.some(
+      (variant) =>
+        !Number.isFinite(variant.quantity) || variant.quantity <= 0
+    ) ||
+    current.some(
+      (variant) =>
+        !Number.isFinite(variant.quantity) || variant.quantity <= 0
+    ) ||
+    !Number.isFinite(sourceTotal) ||
+    !Number.isFinite(currentTotal) ||
+    sourceTotal <= 0 ||
+    currentTotal <= 0
+  ) {
+    return false;
+  }
+
+  const sourceNode = 0;
+  const firstSourceVariantNode = 1;
+  const firstCurrentVariantNode = firstSourceVariantNode + source.length;
+  const sinkNode = firstCurrentVariantNode + current.length;
+  const nodeCount = sinkNode + 1;
+  const capacity = Array.from(
+    { length: nodeCount },
+    () => new Array(nodeCount).fill(0)
   );
+  const totalCapacity = sourceTotal * currentTotal;
+  if (!Number.isFinite(totalCapacity) || totalCapacity <= 0) {
+    return false;
+  }
+
+  // Cross-multiplication preserves variant proportions when the item total
+  // changes. Residual flow lets broad partial variants yield capacity to more
+  // specific variants instead of double-counting every compatible cart line.
+  for (let sourceIndex = 0; sourceIndex < source.length; sourceIndex += 1) {
+    const variantNode = firstSourceVariantNode + sourceIndex;
+    capacity[sourceNode][variantNode] =
+      source[sourceIndex].quantity * currentTotal;
+    for (
+      let currentIndex = 0;
+      currentIndex < current.length;
+      currentIndex += 1
+    ) {
+      if (compatible(source[sourceIndex], current[currentIndex])) {
+        capacity[variantNode][firstCurrentVariantNode + currentIndex] =
+          totalCapacity;
+      }
+    }
+  }
+  for (
+    let currentIndex = 0;
+    currentIndex < current.length;
+    currentIndex += 1
+  ) {
+    capacity[firstCurrentVariantNode + currentIndex][sinkNode] =
+      current[currentIndex].quantity * sourceTotal;
+  }
+
+  const tolerance = Math.max(1, totalCapacity) * 1e-9;
+  let matchedCapacity = 0;
+  while (matchedCapacity + tolerance < totalCapacity) {
+    const parent = new Array(nodeCount).fill(-1);
+    parent[sourceNode] = sourceNode;
+    const queue = [sourceNode];
+    for (
+      let cursor = 0;
+      cursor < queue.length && parent[sinkNode] === -1;
+      cursor += 1
+    ) {
+      const node = queue[cursor];
+      for (let next = 0; next < nodeCount; next += 1) {
+        if (parent[next] === -1 && capacity[node][next] > tolerance) {
+          parent[next] = node;
+          queue.push(next);
+          if (next === sinkNode) {
+            break;
+          }
+        }
+      }
+    }
+    if (parent[sinkNode] === -1) {
+      break;
+    }
+
+    let pathCapacity = Number.POSITIVE_INFINITY;
+    for (let node = sinkNode; node !== sourceNode; node = parent[node]) {
+      pathCapacity = Math.min(
+        pathCapacity,
+        capacity[parent[node]][node]
+      );
+    }
+    for (let node = sinkNode; node !== sourceNode; node = parent[node]) {
+      const previous = parent[node];
+      capacity[previous][node] -= pathCapacity;
+      capacity[node][previous] += pathCapacity;
+    }
+    matchedCapacity += pathCapacity;
+  }
+
+  // Receipt order_items expose only a partial selection tree. Require every
+  // selection the receipt did expose, but do not call richer cart detail a
+  // change merely because the receipt omitted descendants or siblings.
+  return Math.abs(totalCapacity - matchedCapacity) <= tolerance;
 }
 
 function reorderComparisonWarnings(sourceItems = [], cartItems = []) {
@@ -859,7 +1097,89 @@ export function createDoorDashApp({
     .update(`doordash-mcp-preview-v1:${adminAccessToken}`, "utf8")
     .digest();
   const inFlightCartWrites = new Set();
+  const knownMenuIdsByStore = new Map();
   let activeCheckoutStateChange = null;
+
+  function rememberMenuId(storeId, menuId) {
+    const normalizedStoreId = String(storeId || "").trim();
+    const normalizedMenuId = authoritativeMenuIdForStore(
+      normalizedStoreId,
+      menuId
+    );
+    if (normalizedStoreId && normalizedMenuId) {
+      knownMenuIdsByStore.set(normalizedStoreId, normalizedMenuId);
+    }
+  }
+
+  function sanitizeProjectedItemDetailsMenu(projected, storeId) {
+    const menuId =
+      authoritativeMenuIdForStore(storeId, projected?.menu_id) ||
+      authoritativeMenuIdForStore(storeId, projected?.store?.menu_id) ||
+      authoritativeMenuIdForStore(storeId, projected?.item?.menu_id);
+    const syntheticMenuIdReturned = [
+      projected?.menu_id,
+      projected?.store?.menu_id,
+      projected?.item?.menu_id
+    ].some(
+      (candidate) =>
+        candidate !== undefined &&
+        String(candidate).trim() === String(storeId).trim()
+    );
+    const warnings = [...(projected?.warnings || [])];
+    if (syntheticMenuIdReturned) {
+      warnings.push(
+        "DoorDash returned store_id as menu_id. That synthetic value was omitted and cannot be sent to add_cart_items."
+      );
+    }
+    return contracts.itemDetails.successSchema.parse({
+      ...projected,
+      menu_id: menuId,
+      ...(projected?.store
+        ? { store: { ...projected.store, menu_id: menuId } }
+        : {}),
+      item: { ...projected.item, menu_id: menuId },
+      ...(warnings.length ? { warnings: [...new Set(warnings)] } : {})
+    });
+  }
+
+  function sanitizeProjectedMenu(projected, storeId) {
+    const menuId = authoritativeMenuIdForStore(storeId, projected?.menu_id);
+    if (!menuId) {
+      throw new DoorDashCliError(
+        "DoorDash returned store_id as menu_id. That synthetic value cannot be handed to item or cart tools.",
+        {
+          code: "RESTAURANT_MENU_ID_UNAVAILABLE",
+          storeId
+        }
+      );
+    }
+    return contracts.menu.successSchema.parse({
+      ...projected,
+      menu_id: menuId,
+      ...(projected?.store
+        ? { store: { ...projected.store, menu_id: menuId } }
+        : {}),
+      items: projected.items.map((item) => ({
+        ...item,
+        menu_id:
+          authoritativeMenuIdForStore(storeId, item.menu_id) || menuId
+      }))
+    });
+  }
+
+  function rememberProjectedMenuIds(projected) {
+    const candidates = [
+      projected,
+      ...(projected?.carts || []),
+      ...(projected?.orders || [])
+    ];
+    for (const candidate of candidates) {
+      rememberMenuId(
+        candidate?.store?.store_id,
+        candidate?.menu_id || candidate?.store?.menu_id
+      );
+    }
+  }
 
   function acquireCheckoutStateChange({
     operation,
@@ -1034,6 +1354,7 @@ export function createDoorDashApp({
         ...options,
         project: (data) => projectWithContract(contract, transform(data))
       });
+      rememberProjectedMenuIds(projected);
       return toToolResult(projected);
     } catch (error) {
       const isLockConflict =
@@ -1086,9 +1407,23 @@ export function createDoorDashApp({
     }
   }
 
-  async function resolveRestaurantMenuId(input) {
-    if (input.menuId) {
-      return input.menuId;
+  async function resolveRestaurantMenuContext(input) {
+    const knownMenuId = knownMenuIdsByStore.get(input.storeId);
+    if (knownMenuId) {
+      return {
+        lookupMenuId: knownMenuId,
+        authoritativeMenuId: knownMenuId
+      };
+    }
+    const suppliedMenuId = authoritativeMenuIdForStore(
+      input.storeId,
+      input.menuId
+    );
+    if (suppliedMenuId) {
+      return {
+        lookupMenuId: suppliedMenuId,
+        authoritativeMenuId: suppliedMenuId
+      };
     }
 
     let storeDetails;
@@ -1103,11 +1438,67 @@ export function createDoorDashApp({
     const storeMenuId =
       storeDetails?.success === false || storeDetails?.success === "false"
         ? undefined
-        : returnedRestaurantMenuId(storeDetails);
+        : authoritativeMenuIdForStore(
+            input.storeId,
+            returnedRestaurantMenuId(storeDetails)
+          );
     if (storeMenuId) {
-      return storeMenuId;
+      rememberMenuId(input.storeId, storeMenuId);
+      return {
+        lookupMenuId: storeMenuId,
+        authoritativeMenuId: storeMenuId
+      };
     }
-    return input.storeId;
+    return {
+      lookupMenuId: input.storeId,
+      authoritativeMenuId: undefined
+    };
+  }
+
+  async function findItems(input) {
+    try {
+      let storeDetails;
+      try {
+        storeDetails = await executeCli(
+          storeDetailsArgs({ storeId: input.storeId }),
+          { project: (data) => data }
+        );
+      } catch {
+        // Let the catalog endpoint handle stores whose vertical is unknown.
+      }
+      if (rawStoreIsRestaurant(storeDetails)) {
+        if (input.queries.length !== 1) {
+          return toolError(
+            new DoorDashCliError(
+              `find_items cannot search restaurant catalogs. Call get_menu once per dish; ${input.queries.length} queries were supplied, so no automatic recovery is safe.`,
+              {
+                code: "RESTAURANT_REQUIRES_SINGLE_MENU_QUERY",
+                storeId: input.storeId
+              }
+            ),
+            contracts.itemSearch
+          );
+        }
+        const [query] = input.queries;
+        return toolError(
+          new DoorDashCliError(
+            `find_items searches grocery and retail catalogs only. This store is a restaurant; call get_menu with store_id ${input.storeId} and query "${query}". Do not retry find_items for this store.`,
+            {
+              code: "RESTAURANT_REQUIRES_MENU",
+              storeId: input.storeId,
+              query
+            }
+          ),
+          contracts.itemSearch
+        );
+      }
+      const projected = await executeCli(findItemsArgs(input), {
+        project: (data) => projectWithContract(contracts.itemSearch, data)
+      });
+      return toToolResult(projected);
+    } catch (error) {
+      return toolError(error, contracts.itemSearch);
+    }
   }
 
   async function getItemDetails(input) {
@@ -1115,7 +1506,7 @@ export function createDoorDashApp({
       input.itemId.startsWith("i_") || Boolean(input.menuId);
     if (!restaurantItem) {
       try {
-        const projected = await executeCli(itemDetailsArgs(input), {
+        const rawProjected = await executeCli(itemDetailsArgs(input), {
           project: (data) =>
             projectWithContract(contracts.itemDetails, {
               ...data,
@@ -1127,6 +1518,11 @@ export function createDoorDashApp({
                   : { store_id: input.storeId })
             })
         });
+        const projected = sanitizeProjectedItemDetailsMenu(
+          rawProjected,
+          input.storeId
+        );
+        rememberProjectedMenuIds(projected);
         return toToolResult(projected);
       } catch (error) {
         return toolError(error, contracts.itemDetails);
@@ -1134,20 +1530,24 @@ export function createDoorDashApp({
     }
 
     try {
-      const menuId = await resolveRestaurantMenuId(input);
+      const menuContext = await resolveRestaurantMenuContext(input);
+      let authoritativeMenuId = menuContext.authoritativeMenuId;
       const projected = await executeCli(
         restaurantItemDetailsArgs({
           storeId: input.storeId,
-          menuId,
+          menuId: menuContext.lookupMenuId,
           itemId: input.itemId
         }),
         {
           project: (data) => {
-            const responseMenuId =
-              returnedRestaurantMenuId(data) || menuId;
+            authoritativeMenuId =
+              authoritativeMenuIdForStore(
+                input.storeId,
+                returnedRestaurantMenuId(data)
+              ) || authoritativeMenuId;
             return projectWithContract(contracts.itemDetails, {
               ...data,
-              menu_id: responseMenuId,
+              menu_id: authoritativeMenuId,
               mcp_option_queries: input.optionQueries,
               store:
                 data?.store ||
@@ -1158,7 +1558,14 @@ export function createDoorDashApp({
           }
         }
       );
-      return toToolResult(projected);
+      const sanitizedProjected = sanitizeProjectedItemDetailsMenu(
+        projected,
+        input.storeId
+      );
+      if (authoritativeMenuId) {
+        rememberMenuId(input.storeId, authoritativeMenuId);
+      }
+      return toToolResult(sanitizedProjected);
     } catch (error) {
       return toolError(error, contracts.itemDetails);
     }
@@ -1260,16 +1667,16 @@ export function createDoorDashApp({
           ...(hydrated.warnings || []),
           ...reorderComparisonWarnings(sourceOrder.items, hydrated.items)
         ];
-        return toToolResult(
-          contracts.reorder.successSchema.parse({
-            ...hydrated,
-            schema: reordered.schema,
-            version: reordered.version,
-            kind: "reorder",
-            cart_uuid: reordered.cart_uuid,
-            ...(warnings.length ? { warnings: [...new Set(warnings)] } : {})
-          })
-        );
+        const result = contracts.reorder.successSchema.parse({
+          ...hydrated,
+          schema: reordered.schema,
+          version: reordered.version,
+          kind: "reorder",
+          cart_uuid: reordered.cart_uuid,
+          ...(warnings.length ? { warnings: [...new Set(warnings)] } : {})
+        });
+        rememberProjectedMenuIds(result);
+        return toToolResult(result);
       } catch (error) {
         throw new DoorDashCliError(
           `DoorDash created cart ${reordered.cart_uuid}, but its contents could not be verified. Call show_cart once with this cart_uuid; do not reorder again.`,
@@ -1290,22 +1697,23 @@ export function createDoorDashApp({
 
   async function getMenu(input) {
     try {
-      const projected = await executeCli(menuArgs(input), {
+      const rawProjected = await executeCli(menuArgs(input), {
         project: (data) =>
           projectWithContract(
             contracts.menu,
             filterMenuByQuery(data, input.query)
           )
       });
+      const projected = sanitizeProjectedMenu(rawProjected, input.storeId);
+      rememberProjectedMenuIds(projected);
       return toToolResult(projected);
     } catch (error) {
       if (error?.name === "DoorDashOperationError") {
         try {
           const history = await executeCli(
-            listOrdersArgs({ max: 25, days: 365 }),
+            listOrdersArgs({ max: 100, days: 365 }),
             {
-              project: (data) =>
-                projectWithContract(contracts.orderList, data)
+              project: projectOrderHistoryForRecovery
             }
           );
           const storeOrders = history.orders.filter(
@@ -1326,36 +1734,110 @@ export function createDoorDashApp({
               historicalItems.push(item);
             }
           }
+          let effectiveMenuId = knownMenuIdsByStore.get(input.storeId);
+          if (!effectiveMenuId) {
+            for (const order of storeOrders) {
+              const historicalMenuId = authoritativeMenuIdForStore(
+                input.storeId,
+                order.menu_id ||
+                  order.store?.menu_id ||
+                  (order.items || []).find((item) => item.menu_id)?.menu_id
+              );
+              if (historicalMenuId) {
+                effectiveMenuId = historicalMenuId;
+                break;
+              }
+            }
+          }
+          if (!effectiveMenuId) {
+            try {
+              const activeCarts = await inspectActiveCarts(input.storeId);
+              const cartMenuIds = [
+                ...new Set(
+                  activeCarts
+                    .map((cart) =>
+                      authoritativeMenuIdForStore(
+                        input.storeId,
+                        cart.menu_id
+                      )
+                    )
+                    .filter(Boolean)
+                )
+              ];
+              if (cartMenuIds.length === 1) {
+                [effectiveMenuId] = cartMenuIds;
+              }
+            } catch {
+              // History recovery can still validate a read-only match.
+            }
+          }
+          if (!effectiveMenuId && input.menuId) {
+            effectiveMenuId = authoritativeMenuIdForStore(
+              input.storeId,
+              input.menuId
+            );
+          }
+          const storeName = storeOrders[0]?.store?.name;
           const matchingItems = input.query
-            ? historicalItems.filter(
-                (item) =>
-                  normalizedChoiceText(item.name) ===
-                  normalizedChoiceText(input.query)
+            ? historicalItems.filter((item) =>
+                restaurantHistoryNameMatchesQuery(
+                  item.name,
+                  input.query,
+                  storeName
+                )
               )
             : historicalItems.slice(0, 5);
+          if (input.query && matchingItems.length === 0) {
+            return toolError(
+              new DoorDashCliError(
+                `DoorDash's restaurant catalog failed, and no recent item exactly matched "${input.query}". This item cannot be safely discovered from order history. Do not use find_items or substitute a related item; use the DoorDash app or website for this store.`,
+                {
+                  code: "RESTAURANT_CATALOG_UNAVAILABLE",
+                  storeId: input.storeId
+                }
+              ),
+              contracts.menu
+            );
+          }
           const currentItems = [];
           const authoritativeMenuIds = new Set();
+          if (effectiveMenuId) {
+            authoritativeMenuIds.add(effectiveMenuId);
+          }
           for (const item of matchingItems.slice(0, 5)) {
             try {
               let authoritativeMenuId;
+              const historicalItemMenuId = authoritativeMenuIdForStore(
+                input.storeId,
+                item.menu_id
+              );
+              const lookupMenuId =
+                effectiveMenuId || historicalItemMenuId || input.storeId;
               const details = await executeCli(
                 restaurantItemDetailsArgs({
                   storeId: input.storeId,
-                  menuId: input.storeId,
+                  menuId: lookupMenuId,
                   itemId: item.item_id
                 }),
                 {
                   project: (data) => {
-                    authoritativeMenuId = returnedRestaurantMenuId(data);
+                    authoritativeMenuId = authoritativeMenuIdForStore(
+                      input.storeId,
+                      returnedRestaurantMenuId(data)
+                    );
                     const responseMenuId =
-                      authoritativeMenuId || input.storeId;
+                      authoritativeMenuId ||
+                      effectiveMenuId ||
+                      historicalItemMenuId;
                     return projectWithContract(contracts.itemDetails, {
                       ...data,
                       menu_id: responseMenuId,
                       store:
                         data?.store || {
                           store_id: input.storeId,
-                          menu_id: responseMenuId,
+                          ...(responseMenuId
+                            ? { menu_id: responseMenuId }
+                            : {}),
                           name: storeOrders[0]?.store?.name
                         }
                     });
@@ -1368,13 +1850,19 @@ export function createDoorDashApp({
                 normalizedChoiceText(details.item.name) !==
                   normalizedChoiceText(item.name) ||
                 (input.query &&
-                  normalizedChoiceText(details.item.name) !==
-                    normalizedChoiceText(input.query))
+                  !restaurantHistoryNameMatchesQuery(
+                    details.item.name,
+                    input.query,
+                    storeName
+                  ))
               ) {
                 continue;
               }
               if (authoritativeMenuId) {
                 authoritativeMenuIds.add(authoritativeMenuId);
+              }
+              if (historicalItemMenuId) {
+                authoritativeMenuIds.add(historicalItemMenuId);
               }
               currentItems.push(details.item);
             } catch {
@@ -1382,24 +1870,37 @@ export function createDoorDashApp({
             }
           }
           if (currentItems.length) {
-            const effectiveMenuId =
-              authoritativeMenuIds.size === 1
-                ? [...authoritativeMenuIds][0]
-                : input.storeId;
-            const projected = projectWithContract(contracts.menu, {
-              success: true,
-              menu_id: effectiveMenuId,
-              store: {
-                store_id: input.storeId,
-                menu_id: effectiveMenuId,
-                name: storeOrders[0]?.store?.name
-              },
-              items: currentItems,
-              truncated: true,
-              warning: input.query
-                ? "DoorDash's full-menu lookup failed. Returned current details for exact-name matches recovered from bounded recent order history, with at most five matches checked; this is not an exhaustive menu search. store_id is the effective restaurant menu context."
-                : "DoorDash's full-menu lookup failed. Returned up to five current items recovered from recent order history; this is not the store's complete menu. store_id is the effective restaurant menu context."
-            });
+            if (authoritativeMenuIds.size !== 1) {
+              return toolError(
+                new DoorDashCliError(
+                  "DoorDash did not provide one authoritative menu_id for these recovered restaurant items. They cannot be sent safely to cart tools.",
+                  {
+                    code: "RESTAURANT_MENU_ID_UNAVAILABLE",
+                    storeId: input.storeId
+                  }
+                ),
+                contracts.menu
+              );
+            }
+            const [recoveredMenuId] = authoritativeMenuIds;
+            const projected = sanitizeProjectedMenu(
+              projectWithContract(contracts.menu, {
+                success: true,
+                menu_id: recoveredMenuId,
+                store: {
+                  store_id: input.storeId,
+                  menu_id: recoveredMenuId,
+                  name: storeOrders[0]?.store?.name
+                },
+                items: currentItems,
+                truncated: true,
+                warning: input.query
+                  ? "DoorDash's full-menu lookup failed. Returned current details for exact dish-name matches recovered from bounded recent order history, with at most five matches checked; this is not an exhaustive menu search."
+                  : "DoorDash's full-menu lookup failed. Returned up to five current items recovered from recent order history; this is not the store's complete menu."
+              }),
+              input.storeId
+            );
+            rememberProjectedMenuIds(projected);
             return toToolResult(projected);
           }
         } catch {
@@ -1407,6 +1908,150 @@ export function createDoorDashApp({
         }
       }
       return toolError(error, contracts.menu);
+    }
+  }
+
+  async function removeCartItem(input) {
+    let stateChangeToken;
+    try {
+      stateChangeToken = acquireCheckoutStateChange({
+        operation: "remove_cart_item",
+        cartUuid: input.cartUuid,
+        stateScope: "cart"
+      });
+      const before = await executeCli(
+        showCartArgs({ cartUuid: input.cartUuid }),
+        {
+          project: (data) => projectWithContract(contracts.cart, data)
+        }
+      );
+      if (before.cart_uuid !== input.cartUuid) {
+        throw new DoorDashCliError(
+          `DoorDash returned cart ${before.cart_uuid} while inspecting ${input.cartUuid}. No item was removed.`,
+          { code: "UPSTREAM_SCHEMA_ERROR" }
+        );
+      }
+      if (before.items_truncation?.omitted) {
+        throw new DoorDashCliError(
+          "The cart is truncated, so the requested old and replacement lines cannot be verified safely. No item was removed.",
+          {
+            code: "ACTIVE_CART_STATE_UNKNOWN",
+            cartUuid: input.cartUuid
+          }
+        );
+      }
+      const oldLine = before.items.find(
+        (item) => item.cart_item_id === input.cartItemId
+      );
+      if (!oldLine) {
+        throw new DoorDashCliError(
+          `Cart line ${input.cartItemId} is not present. No item was removed.`,
+          {
+            code: "CART_LINE_NOT_FOUND",
+            cartUuid: input.cartUuid
+          }
+        );
+      }
+      if (input.replacementCartItemId) {
+        if (input.replacementCartItemId === input.cartItemId) {
+          throw new DoorDashCliError(
+            "replacement_cart_item_id must identify a different, already-added cart line. No item was removed.",
+            {
+              code: "REPLACEMENT_LINE_NOT_FOUND",
+              cartUuid: input.cartUuid
+            }
+          );
+        }
+        const replacementLine = before.items.find(
+          (item) =>
+            item.cart_item_id === input.replacementCartItemId
+        );
+        if (!replacementLine) {
+          throw new DoorDashCliError(
+            `Replacement cart line ${input.replacementCartItemId} is not present. Add and verify the replacement before removing the old line.`,
+            {
+              code: "REPLACEMENT_LINE_NOT_FOUND",
+              cartUuid: input.cartUuid
+            }
+          );
+        }
+      }
+
+      try {
+        await executeCli(removeCartItemArgs(input), {
+          project: (data) =>
+            projectWithContract(contracts.cartMutation, {
+              ...data,
+              cart_uuid: data?.cart_uuid || input.cartUuid
+            })
+        });
+      } catch (error) {
+        if (error?.name === "DoorDashOperationError") {
+          throw error;
+        }
+        throw new DoorDashCliError(
+          "DoorDash did not confirm whether the cart line was removed. Do not call remove_cart_item again. Call show_cart once and compare cart_item_id values.",
+          {
+            code: "CART_MUTATION_OUTCOME_UNKNOWN",
+            cartUuid: input.cartUuid,
+            stateScope: "cart",
+            cause: error instanceof Error ? error.message : String(error)
+          }
+        );
+      }
+
+      let after;
+      try {
+        after = await executeCli(
+          showCartArgs({ cartUuid: input.cartUuid }),
+          {
+            project: (data) => projectWithContract(contracts.cart, data)
+          }
+        );
+      } catch (error) {
+        throw new DoorDashCliError(
+          "DoorDash reported the removal but the remaining cart could not be verified. Do not remove the line again; call show_cart once.",
+          {
+            code: "CART_REMOVAL_HYDRATION_FAILED",
+            cartUuid: input.cartUuid,
+            cause: error instanceof Error ? error.message : String(error)
+          }
+        );
+      }
+      if (after.items_truncation?.omitted) {
+        throw new DoorDashCliError(
+          "DoorDash reported the removal, but the hydrated cart was truncated, so the old-line removal and replacement preservation cannot be verified. Do not retry the removal; call show_cart once.",
+          {
+            code: "CART_REMOVAL_HYDRATION_FAILED",
+            cartUuid: input.cartUuid
+          }
+        );
+      }
+      if (
+        after.cart_uuid !== input.cartUuid ||
+        after.items.some(
+          (item) => item.cart_item_id === input.cartItemId
+        ) ||
+        (input.replacementCartItemId &&
+          !after.items.some(
+            (item) =>
+              item.cart_item_id === input.replacementCartItemId
+          ))
+      ) {
+        throw new DoorDashCliError(
+          "DoorDash reported the removal, but the hydrated cart did not confirm the intended old-line removal and replacement preservation. Do not retry the removal; inspect this cart once.",
+          {
+            code: "CART_REMOVAL_HYDRATION_FAILED",
+            cartUuid: input.cartUuid
+          }
+        );
+      }
+      rememberProjectedMenuIds(after);
+      return toToolResult(after);
+    } catch (error) {
+      return toolError(error, contracts.cart);
+    } finally {
+      releaseCheckoutStateChange(stateChangeToken);
     }
   }
 
@@ -1449,6 +2094,24 @@ export function createDoorDashApp({
   async function preflightCartItems(input) {
     const items = [];
     const itemErrors = [];
+    const hasAmbiguousBareSelections = input.items.some(
+      (item) =>
+        !item.itemId.startsWith("i_") &&
+        !item.requestedOptions?.length &&
+        item.nestedOptions?.length
+    );
+    let storeIsRestaurant = false;
+    if (hasAmbiguousBareSelections) {
+      try {
+        const storeDetails = await executeCli(
+          storeDetailsArgs({ storeId: input.storeId }),
+          { project: (data) => data }
+        );
+        storeIsRestaurant = rawStoreIsRestaurant(storeDetails);
+      } catch {
+        // Unknown vertical keeps the existing retail-then-restaurant fallback.
+      }
+    }
     const itemIdsNeedingDetails = [
       ...new Set(
         input.items
@@ -1500,6 +2163,7 @@ export function createDoorDashApp({
               );
               const restaurantItem =
                 itemId.startsWith("i_") ||
+                storeIsRestaurant ||
                 itemRequests.some(
                   (item) => item.requestedOptions?.length
                 );
@@ -1643,7 +2307,38 @@ export function createDoorDashApp({
         cartUuid: input.cartUuid,
         stateScope: "cart"
       });
-      const preflight = await preflightCartItems(input);
+      let effectiveInput = input;
+      if (input.cartUuid) {
+        const existingCart = await executeCli(
+          showCartArgs({ cartUuid: input.cartUuid }),
+          {
+            project: (data) => projectWithContract(contracts.cart, data)
+          }
+        );
+        if (existingCart.cart_uuid !== input.cartUuid) {
+          throw new DoorDashCliError(
+            `DoorDash returned cart ${existingCart.cart_uuid} while inspecting ${input.cartUuid}. No items were added.`,
+            { code: "UPSTREAM_SCHEMA_ERROR" }
+          );
+        }
+        if (
+          existingCart.store?.store_id &&
+          existingCart.store.store_id !== input.storeId
+        ) {
+          throw new DoorDashCliError(
+            `Cart ${input.cartUuid} belongs to store ${existingCart.store.store_id}, not ${input.storeId}. No items were added.`,
+            { code: "CART_STORE_MISMATCH", cartUuid: input.cartUuid }
+          );
+        }
+        rememberProjectedMenuIds(existingCart);
+        if (existingCart.menu_id) {
+          effectiveInput = {
+            ...input,
+            menuId: existingCart.menu_id
+          };
+        }
+      }
+      const preflight = await preflightCartItems(effectiveInput);
       if (preflight.itemErrors.length) {
         const projected = projectWithContract(contracts.cart, {
           cart: { items: [] },
@@ -1662,7 +2357,7 @@ export function createDoorDashApp({
       }
 
       let addInput = {
-        ...input,
+        ...effectiveInput,
         items: preflight.items
       };
       if (!addInput.cartUuid) {
@@ -2003,9 +2698,11 @@ export function createDoorDashApp({
     registerDoorDashTools(server, {
       authInfo,
       addCartItems,
+      findItems,
       getItemDetails,
       getMenu,
       previewOrder: (input) => previewOrder(input, authInfo),
+      removeCartItem,
       reorder,
       invoke: (args, options) => invoke(args, options, authInfo),
       invokeAtDefaultAddress: (input, buildArgs) =>
