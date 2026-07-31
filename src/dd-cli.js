@@ -61,13 +61,13 @@ export function assertPurchaseAllowed(args, allowPurchases = false) {
 export function assertGenericCommandAllowed(args) {
   if (args[0] === "payment-method") {
     throw new DoorDashCliError(
-      "Payment methods are blocked in doordash_run. Use doordash_list_payment_methods with a purchase-enabled bearer token."
+      "Payment methods are blocked in run. Use list_payment_methods with a purchase-enabled bearer token."
     );
   }
 
   if (args[0] === "order" && args[1] === "submit") {
     throw new DoorDashCliError(
-      "Order submission is blocked in doordash_run. Use doordash_order_submit with a purchase-enabled bearer token."
+      "Order submission is blocked in run. Use order_submit with a purchase-enabled bearer token."
     );
   }
 

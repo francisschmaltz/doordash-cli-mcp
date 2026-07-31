@@ -4,6 +4,13 @@ import test from "node:test";
 import { createDoorDashApp } from "../src/app.js";
 import { SecurityStore } from "../src/security-store.js";
 
+function createTestApp(options) {
+  return createDoorDashApp({
+    adminAccessToken: "test-admin-secret",
+    ...options
+  });
+}
+
 function cliResult(structuredContent) {
   return {
     ok: true,
@@ -63,7 +70,7 @@ test("purchase tools appear only for tokens with the checkbox enabled", async ()
     name: "Open WebUI",
     allowPurchases: false
   });
-  const { mcpHandler } = createDoorDashApp({
+  const { mcpHandler } = createTestApp({
     securityStore: store,
     runCli: async () => {
       throw new Error("CLI should not run during tools/list.");
@@ -77,8 +84,8 @@ test("purchase tools appear only for tokens with the checkbox enabled", async ()
     {}
   );
   const safeNames = safeList.body.result.tools.map((tool) => tool.name);
-  assert.equal(safeNames.includes("doordash_list_payment_methods"), false);
-  assert.equal(safeNames.includes("doordash_order_submit"), false);
+  assert.equal(safeNames.includes("list_payment_methods"), false);
+  assert.equal(safeNames.includes("order_submit"), false);
   assert.equal(
     safeList.body.result.tools.every(
       (tool) =>
@@ -98,8 +105,12 @@ test("purchase tools appear only for tokens with the checkbox enabled", async ()
     2
   );
   const purchaseNames = purchaseList.body.result.tools.map((tool) => tool.name);
-  assert.equal(purchaseNames.includes("doordash_list_payment_methods"), true);
-  assert.equal(purchaseNames.includes("doordash_order_submit"), true);
+  assert.equal(purchaseNames.includes("list_payment_methods"), true);
+  assert.equal(purchaseNames.includes("order_submit"), true);
+  assert.equal(
+    purchaseNames.some((name) => name.startsWith("doordash_")),
+    false
+  );
   assert.equal(
     purchaseList.body.result.tools.every(
       (tool) =>
@@ -121,7 +132,7 @@ test("generic runner cannot bypass payment gating", async () => {
     allowPurchases: true
   });
   let cliCalls = 0;
-  const { mcpHandler } = createDoorDashApp({
+  const { mcpHandler } = createTestApp({
     securityStore: store,
     runCli: async () => {
       cliCalls += 1;
@@ -134,7 +145,7 @@ test("generic runner cannot bypass payment gating", async () => {
     authInfo(store, token.token),
     "tools/call",
     {
-      name: "doordash_run",
+      name: "run",
       arguments: {
         args: ["payment-method", "list"]
       }
@@ -143,7 +154,7 @@ test("generic runner cannot bypass payment gating", async () => {
   assert.equal(response.body.result.isError, true);
   assert.match(
     response.body.result.structuredContent.error.message,
-    /blocked in doordash_run/
+    /blocked in run/
   );
   assert.equal(cliCalls, 0);
 
@@ -159,7 +170,7 @@ test("permission is rechecked immediately before a dangerous CLI call", async ()
   });
   const staleAuth = authInfo(store, token.token);
   let cliCalls = 0;
-  const { mcpHandler } = createDoorDashApp({
+  const { mcpHandler } = createTestApp({
     securityStore: store,
     runCli: async () => {
       cliCalls += 1;
@@ -173,7 +184,7 @@ test("permission is rechecked immediately before a dangerous CLI call", async ()
     staleAuth,
     "tools/call",
     {
-      name: "doordash_list_payment_methods",
+      name: "list_payment_methods",
       arguments: {}
     }
   );
@@ -194,7 +205,7 @@ test("typed tools return concise text and normalized structured content", async 
     name: "Open WebUI",
     allowPurchases: false
   });
-  const { mcpHandler } = createDoorDashApp({
+  const { mcpHandler } = createTestApp({
     securityStore: store,
     runCli: async () =>
       cliResult({
@@ -216,7 +227,7 @@ test("typed tools return concise text and normalized structured content", async 
     authInfo(store, token.token),
     "tools/call",
     {
-      name: "doordash_search_restaurants",
+      name: "search_restaurants",
       arguments: {
         query: "pizza",
         limit: 10
@@ -265,7 +276,7 @@ test("malformed upstream data is a typed MCP error, not an empty result", async 
     name: "Open WebUI",
     allowPurchases: false
   });
-  const { mcpHandler } = createDoorDashApp({
+  const { mcpHandler } = createTestApp({
     securityStore: store,
     runCli: async () => cliResult({ success: true })
   });
@@ -275,7 +286,7 @@ test("malformed upstream data is a typed MCP error, not an empty result", async 
     authInfo(store, token.token),
     "tools/call",
     {
-      name: "doordash_search_restaurants",
+      name: "search_restaurants",
       arguments: {
         query: "pizza",
         limit: 10
@@ -302,7 +313,7 @@ test("submit revalidates quote and card, records the attempt, and polls status",
     allowPurchases: true
   });
   const calls = [];
-  const { mcpHandler } = createDoorDashApp({
+  const { mcpHandler } = createTestApp({
     securityStore: store,
     pollDelay: async () => {},
     runCli: async (args, options) => {
@@ -380,7 +391,7 @@ test("submit revalidates quote and card, records the attempt, and polls status",
     authInfo(store, token.token),
     "tools/call",
     {
-      name: "doordash_order_submit",
+      name: "order_submit",
       arguments: {
         cartUuid: "cart-1",
         expectedTotalBeforeTipCents: 2500,
@@ -451,7 +462,7 @@ test("submit revalidates quote and card, records the attempt, and polls status",
     authInfo(store, token.token),
     "tools/call",
     {
-      name: "doordash_order_submit",
+      name: "order_submit",
       arguments: {
         cartUuid: "cart-1",
         expectedTotalBeforeTipCents: 2500,

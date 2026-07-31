@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <meta name="theme-color" content="#ffffff" />
+    <title>DoorDash CLI MCP Admin</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <script src="/login.js" type="module"></script>
+  </head>
+  <body class="login-page">
+    <main class="login-shell">
+      <section class="login-panel" aria-labelledby="login-title">
+        <div>
+          <span class="login-product">DoorDash CLI MCP</span>
+          <h1 id="login-title">Admin access</h1>
+          <p>Enter the secret configured in <code>ADMIN_ACCESS_TOKEN</code>.</p>
+        </div>
+
+        <form id="login-form" class="login-form">
+          <label>
+            <span class="visually-hidden">Admin secret</span>
+            <input
+              id="admin-secret"
+              name="secret"
+              type="password"
+              autocomplete="current-password"
+              placeholder="Admin secret"
+              required
+              autofocus
+            />
+          </label>
+          <button class="button button-primary" type="submit">Continue</button>
+        </form>
+
+        <p id="login-error" class="login-error" role="alert" hidden></p>
+      </section>
+    </main>
+  </body>
+</html>

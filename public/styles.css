@@ -104,6 +104,25 @@ summary:focus-visible {
   gap: 16px;
 }
 
+.logout-button {
+  padding: 0;
+  border: 0;
+  color: var(--text-secondary);
+  background: transparent;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.logout-button:hover {
+  color: var(--text);
+}
+
+.logout-button:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+
 .status {
   display: inline-flex;
   min-width: 0;
@@ -706,6 +725,80 @@ footer a {
   clip: rect(0 0 0 0);
   white-space: nowrap;
   clip-path: inset(50%);
+}
+
+.login-page {
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: var(--surface-subtle);
+}
+
+.login-shell {
+  width: min(100%, 400px);
+}
+
+.login-panel {
+  display: grid;
+  gap: 28px;
+  padding: 28px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+  background: var(--canvas);
+}
+
+.login-product {
+  display: block;
+  margin-bottom: 18px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.login-panel h1 {
+  margin-bottom: 8px;
+  font-size: 24px;
+}
+
+.login-panel p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.login-panel code {
+  color: var(--text);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+}
+
+.login-form {
+  display: grid;
+  gap: 10px;
+}
+
+.login-form input {
+  width: 100%;
+  min-height: 42px;
+  padding: 0 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-control);
+  color: var(--text);
+  background: var(--canvas);
+}
+
+.login-form .button {
+  width: 100%;
+}
+
+.login-error {
+  padding: 10px 12px;
+  border-left: 3px solid var(--danger);
+  color: var(--danger) !important;
+  background: #fff7f6;
+}
+
+.login-error[hidden] {
+  display: none;
 }
 
 @media (max-width: 760px) {

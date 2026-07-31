@@ -2312,34 +2312,34 @@ export const contracts = {
 };
 
 const toolContracts = {
-  doordash_list_addresses: contracts.addresses,
-  doordash_set_default_address: contracts.addressUpdate,
-  doordash_build_grocery_list: contracts.groceryList,
-  doordash_find_items: contracts.itemSearch,
-  doordash_find_nearby_stores: contracts.storeSearch,
-  doordash_get_item_details: contracts.itemDetails,
-  doordash_get_menu: contracts.menu,
-  doordash_get_restaurant_item_details: contracts.itemDetails,
-  doordash_search_restaurants: contracts.storeSearch,
-  doordash_get_store_details: contracts.storeDetails,
-  doordash_add_cart_items: contracts.cart,
-  doordash_delete_cart: contracts.cartMutation,
-  doordash_list_carts: contracts.cartList,
-  doordash_remove_cart_item: contracts.cartMutation,
-  doordash_show_cart: contracts.cart,
-  doordash_create_checkout_link: contracts.checkoutLink,
-  doordash_list_orders: contracts.orderList,
-  doordash_preview_order: contracts.orderPreview,
-  doordash_get_receipt: contracts.receipt,
-  doordash_reorder: contracts.reorder,
-  doordash_order_status: contracts.orderStatus,
-  doordash_list_promos: contracts.promotionList,
-  doordash_apply_promo: contracts.promotionMutation,
-  doordash_remove_promo: contracts.promotionMutation,
-  doordash_list_payment_methods: contracts.paymentMethods,
-  doordash_order_submit: contracts.orderSubmit,
-  doordash_activity: contracts.activity,
-  doordash_run: contracts.rawCli
+  list_addresses: contracts.addresses,
+  set_default_address: contracts.addressUpdate,
+  build_grocery_list: contracts.groceryList,
+  find_items: contracts.itemSearch,
+  find_nearby_stores: contracts.storeSearch,
+  get_item_details: contracts.itemDetails,
+  get_menu: contracts.menu,
+  get_restaurant_item_details: contracts.itemDetails,
+  search_restaurants: contracts.storeSearch,
+  get_store_details: contracts.storeDetails,
+  add_cart_items: contracts.cart,
+  delete_cart: contracts.cartMutation,
+  list_carts: contracts.cartList,
+  remove_cart_item: contracts.cartMutation,
+  show_cart: contracts.cart,
+  create_checkout_link: contracts.checkoutLink,
+  list_orders: contracts.orderList,
+  preview_order: contracts.orderPreview,
+  get_receipt: contracts.receipt,
+  reorder: contracts.reorder,
+  order_status: contracts.orderStatus,
+  list_promos: contracts.promotionList,
+  apply_promo: contracts.promotionMutation,
+  remove_promo: contracts.promotionMutation,
+  list_payment_methods: contracts.paymentMethods,
+  order_submit: contracts.orderSubmit,
+  activity: contracts.activity,
+  run: contracts.rawCli
 };
 
 const commandContracts = new Map([
@@ -2415,10 +2415,10 @@ function recoveryToolFor(code, message) {
     code === "AGENTIC_RESTRICTED_ITEM_NOT_ALLOWED" ||
     /restricted item|finish.*browser|verification/i.test(message)
   ) {
-    return "doordash_create_checkout_link";
+    return "create_checkout_link";
   }
   if (/status|submission attempt|duplicate charge/i.test(message)) {
-    return "doordash_order_status";
+    return "order_status";
   }
   return undefined;
 }

@@ -9,6 +9,7 @@ const elements = {
   dismissToken: document.querySelector("#dismiss-token"),
   emptyState: document.querySelector("#empty-state"),
   lastRefresh: document.querySelector("#last-refresh"),
+  logout: document.querySelector("#logout"),
   mcpEndpoint: document.querySelector("#mcp-endpoint"),
   purchaseStatus: document.querySelector("#purchase-status"),
   refresh: document.querySelector("#refresh"),
@@ -516,6 +517,9 @@ async function fetchJson(url, options = {}) {
 
   const body = await response.json().catch(() => null);
   if (!response.ok) {
+    if (response.status === 401) {
+      window.location.replace("/login");
+    }
     const error = new Error(body?.error || `${response.status} ${response.statusText}`);
     error.httpStatus = response.status;
     throw error;
@@ -795,6 +799,21 @@ elements.dismissToken.addEventListener("click", () => {
 
 elements.refresh.addEventListener("click", () => {
   void runManualRefresh();
+});
+
+elements.logout.addEventListener("click", async () => {
+  elements.logout.disabled = true;
+  try {
+    await fetch("/api/admin/session", {
+      method: "DELETE",
+      cache: "no-store",
+      headers: {
+        Accept: "application/json"
+      }
+    });
+  } finally {
+    window.location.replace("/login");
+  }
 });
 
 elements.autoRefresh.addEventListener("change", () => {

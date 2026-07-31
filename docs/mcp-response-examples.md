@@ -37,36 +37,36 @@ The wire contract has one value per fact:
 
 | Tool | `kind` |
 | --- | --- |
-| `doordash_list_addresses` | `address_list` |
-| `doordash_set_default_address` | `address_update` |
-| `doordash_build_grocery_list` | `grocery_list` |
-| `doordash_find_items` | `item_search` |
-| `doordash_find_nearby_stores` | `store_search` |
-| `doordash_get_item_details` | `item_details` |
-| `doordash_get_menu` | `menu` |
-| `doordash_get_restaurant_item_details` | `item_details` |
-| `doordash_search_restaurants` | `store_search` |
-| `doordash_get_store_details` | `store_details` |
-| `doordash_add_cart_items` | `cart` |
-| `doordash_delete_cart` | `cart_mutation` |
-| `doordash_list_carts` | `cart_list` |
-| `doordash_remove_cart_item` | `cart_mutation` |
-| `doordash_show_cart` | `cart` |
-| `doordash_create_checkout_link` | `checkout_link` |
-| `doordash_list_orders` | `order_list` |
-| `doordash_preview_order` | `order_preview` |
-| `doordash_get_receipt` | `receipt` |
-| `doordash_reorder` | `reorder` |
-| `doordash_order_status` | `order_status` |
-| `doordash_list_promos` | `promotion_list` |
-| `doordash_apply_promo` | `promotion_mutation` |
-| `doordash_remove_promo` | `promotion_mutation` |
-| `doordash_list_payment_methods` | `payment_methods` |
-| `doordash_order_submit` | `order_submit` |
-| `doordash_activity` | `activity` |
-| `doordash_run` | `raw_cli` |
+| `list_addresses` | `address_list` |
+| `set_default_address` | `address_update` |
+| `build_grocery_list` | `grocery_list` |
+| `find_items` | `item_search` |
+| `find_nearby_stores` | `store_search` |
+| `get_item_details` | `item_details` |
+| `get_menu` | `menu` |
+| `get_restaurant_item_details` | `item_details` |
+| `search_restaurants` | `store_search` |
+| `get_store_details` | `store_details` |
+| `add_cart_items` | `cart` |
+| `delete_cart` | `cart_mutation` |
+| `list_carts` | `cart_list` |
+| `remove_cart_item` | `cart_mutation` |
+| `show_cart` | `cart` |
+| `create_checkout_link` | `checkout_link` |
+| `list_orders` | `order_list` |
+| `preview_order` | `order_preview` |
+| `get_receipt` | `receipt` |
+| `reorder` | `reorder` |
+| `order_status` | `order_status` |
+| `list_promos` | `promotion_list` |
+| `apply_promo` | `promotion_mutation` |
+| `remove_promo` | `promotion_mutation` |
+| `list_payment_methods` | `payment_methods` |
+| `order_submit` | `order_submit` |
+| `activity` | `activity` |
+| `run` | `raw_cli` |
 
-`doordash_run` is intentionally generic. Its `raw_cli` payload is not
+`run` is intentionally generic. Its `raw_cli` payload is not
 advertised as a stable typed contract.
 
 ## Kind payloads

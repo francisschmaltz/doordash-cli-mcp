@@ -1,11 +1,19 @@
+import { existsSync } from "node:fs";
 import path from "node:path";
 
 import { createDoorDashApp } from "./app.js";
 import { SecurityStore } from "./security-store.js";
 
+if (existsSync(".env")) {
+  process.loadEnvFile(".env");
+}
+
 const HOST = process.env.HOST || "127.0.0.1";
 const PORT = parsePort(process.env.PORT || "8787");
 const CLI_TIMEOUT_MS = parseTimeout(process.env.DD_CLI_TIMEOUT_MS || "120000");
+const ADMIN_ACCESS_TOKEN = parseAdminAccessToken(
+  process.env.ADMIN_ACCESS_TOKEN
+);
 const DATABASE_PATH = path.resolve(
   process.env.DD_MCP_DB_PATH || ".data/doordash-mcp.sqlite"
 );
@@ -26,11 +34,21 @@ function parseTimeout(value) {
   return timeout;
 }
 
+function parseAdminAccessToken(value) {
+  if (typeof value !== "string" || value.length < 16) {
+    throw new Error(
+      "ADMIN_ACCESS_TOKEN must contain at least 16 characters. Set it in .env."
+    );
+  }
+  return value;
+}
+
 const securityStore = new SecurityStore({
   databasePath: DATABASE_PATH
 });
 const { app, mcpHandler } = createDoorDashApp({
   securityStore,
+  adminAccessToken: ADMIN_ACCESS_TOKEN,
   cliTimeoutMs: CLI_TIMEOUT_MS
 });
 

@@ -102,7 +102,7 @@ function register(server, name, config, handler) {
 export function registerDoorDashTools(server, context) {
   register(
     server,
-    "doordash_list_addresses",
+    "list_addresses",
     {
       title: "List DoorDash Addresses",
       description:
@@ -115,7 +115,7 @@ export function registerDoorDashTools(server, context) {
 
   register(
     server,
-    "doordash_set_default_address",
+    "set_default_address",
     {
       title: "Set Default DoorDash Address",
       description:
@@ -134,7 +134,7 @@ export function registerDoorDashTools(server, context) {
 
   register(
     server,
-    "doordash_build_grocery_list",
+    "build_grocery_list",
     {
       title: "Build DoorDash Grocery List",
       description:
@@ -160,7 +160,7 @@ export function registerDoorDashTools(server, context) {
 
   register(
     server,
-    "doordash_find_items",
+    "find_items",
     {
       title: "Find DoorDash Store Items",
       description:
@@ -176,7 +176,7 @@ export function registerDoorDashTools(server, context) {
 
   register(
     server,
-    "doordash_find_nearby_stores",
+    "find_nearby_stores",
     {
       title: "Find Nearby DoorDash Stores",
       description:
@@ -201,7 +201,7 @@ export function registerDoorDashTools(server, context) {
 
   register(
     server,
-    "doordash_get_item_details",
+    "get_item_details",
     {
       title: "Get DoorDash Store Item Details",
       description:
@@ -217,7 +217,7 @@ export function registerDoorDashTools(server, context) {
 
   register(
     server,
-    "doordash_get_menu",
+    "get_menu",
     {
       title: "Get DoorDash Restaurant Menu",
       description:
@@ -232,7 +232,7 @@ export function registerDoorDashTools(server, context) {
 
   register(
     server,
-    "doordash_get_restaurant_item_details",
+    "get_restaurant_item_details",
     {
       title: "Get DoorDash Restaurant Item Details",
       description:
@@ -249,7 +249,7 @@ export function registerDoorDashTools(server, context) {
 
   register(
     server,
-    "doordash_search_restaurants",
+    "search_restaurants",
     {
       title: "Search DoorDash Restaurants",
       description:
@@ -274,7 +274,7 @@ export function registerDoorDashTools(server, context) {
 
   register(
     server,
-    "doordash_get_store_details",
+    "get_store_details",
     {
       title: "Get DoorDash Store Details",
       description:
@@ -289,7 +289,7 @@ export function registerDoorDashTools(server, context) {
 
   register(
     server,
-    "doordash_add_cart_items",
+    "add_cart_items",
     {
       title: "Add DoorDash Cart Items",
       description:
@@ -328,7 +328,7 @@ export function registerDoorDashTools(server, context) {
 
   register(
     server,
-    "doordash_delete_cart",
+    "delete_cart",
     {
       title: "Delete DoorDash Cart",
       description:
@@ -347,7 +347,7 @@ export function registerDoorDashTools(server, context) {
 
   register(
     server,
-    "doordash_list_carts",
+    "list_carts",
     {
       title: "List DoorDash Carts",
       description:
@@ -362,7 +362,7 @@ export function registerDoorDashTools(server, context) {
 
   register(
     server,
-    "doordash_remove_cart_item",
+    "remove_cart_item",
     {
       title: "Remove DoorDash Cart Item",
       description:
@@ -382,7 +382,7 @@ export function registerDoorDashTools(server, context) {
 
   register(
     server,
-    "doordash_show_cart",
+    "show_cart",
     {
       title: "Show DoorDash Cart",
       description:
@@ -397,7 +397,7 @@ export function registerDoorDashTools(server, context) {
 
   register(
     server,
-    "doordash_create_checkout_link",
+    "create_checkout_link",
     {
       title: "Create DoorDash Checkout Link",
       description:
@@ -412,7 +412,7 @@ export function registerDoorDashTools(server, context) {
 
   register(
     server,
-    "doordash_list_orders",
+    "list_orders",
     {
       title: "List DoorDash Orders",
       description:
@@ -428,7 +428,7 @@ export function registerDoorDashTools(server, context) {
 
   register(
     server,
-    "doordash_preview_order",
+    "preview_order",
     {
       title: "Preview DoorDash Order",
       description:
@@ -447,7 +447,7 @@ export function registerDoorDashTools(server, context) {
 
   register(
     server,
-    "doordash_get_receipt",
+    "get_receipt",
     {
       title: "Get DoorDash Receipt",
       description:
@@ -462,7 +462,7 @@ export function registerDoorDashTools(server, context) {
 
   register(
     server,
-    "doordash_reorder",
+    "reorder",
     {
       title: "Reorder DoorDash Order",
       description:
@@ -480,7 +480,7 @@ export function registerDoorDashTools(server, context) {
 
   register(
     server,
-    "doordash_order_status",
+    "order_status",
     {
       title: "Check DoorDash Order Status",
       description:
@@ -495,7 +495,7 @@ export function registerDoorDashTools(server, context) {
 
   register(
     server,
-    "doordash_list_promos",
+    "list_promos",
     {
       title: "List DoorDash Promotions",
       description:
@@ -510,7 +510,7 @@ export function registerDoorDashTools(server, context) {
 
   register(
     server,
-    "doordash_apply_promo",
+    "apply_promo",
     {
       title: "Apply DoorDash Promotion",
       description:
@@ -526,7 +526,7 @@ export function registerDoorDashTools(server, context) {
 
   register(
     server,
-    "doordash_remove_promo",
+    "remove_promo",
     {
       title: "Remove DoorDash Promotion",
       description:
@@ -544,7 +544,7 @@ export function registerDoorDashTools(server, context) {
   if (hasPurchaseAccess(context.authInfo)) {
     register(
       server,
-      "doordash_list_payment_methods",
+      "list_payment_methods",
       {
         title: "List DoorDash Payment Cards",
         description:
@@ -560,7 +560,7 @@ export function registerDoorDashTools(server, context) {
 
     register(
       server,
-      "doordash_order_submit",
+      "order_submit",
       {
         title: "Submit DoorDash Order",
         description:
@@ -609,7 +609,7 @@ export function registerDoorDashTools(server, context) {
 
   register(
     server,
-    "doordash_activity",
+    "activity",
     {
       title: "DoorDash Activity",
       description:
@@ -636,7 +636,7 @@ export function registerDoorDashTools(server, context) {
 
   register(
     server,
-    "doordash_run",
+    "run",
     {
       title: "Run Safe DoorDash CLI Command",
       description:

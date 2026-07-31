@@ -452,7 +452,7 @@ test("order statuses and restricted-item recovery remain actionable", () => {
   );
   assert.equal(
     projected.error.recovery_tool,
-    "doordash_create_checkout_link"
+    "create_checkout_link"
   );
 });
 

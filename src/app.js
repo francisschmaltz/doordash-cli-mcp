@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import * as z from "zod/v4";
 
 import { ActivityLog } from "./activity-log.js";
+import { createAdminAuth } from "./admin-auth.js";
 import { createTokenVerifier } from "./auth.js";
 import {
   listPaymentMethodsArgs,
@@ -36,6 +37,9 @@ import { registerDoorDashTools } from "./tools.js";
 
 const SOURCE_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.resolve(SOURCE_DIR, "..", "public");
+const LOGIN_PATH = path.join(PUBLIC_DIR, "login.html");
+const LOGIN_SCRIPT_PATH = path.join(PUBLIC_DIR, "login.js");
+const STYLES_PATH = path.join(PUBLIC_DIR, "styles.css");
 const SERVER_VERSION = "0.3.0";
 const TERMINAL_ORDER_STATUSES = new Set([
   "successful",
@@ -217,6 +221,7 @@ function validateCardPayment(input, paymentMethods) {
 
 export function createDoorDashApp({
   securityStore,
+  adminAccessToken,
   cliTimeoutMs = 120_000,
   runCli = runDoorDashCli,
   activityLog = new ActivityLog({ capacity: 100 }),
@@ -442,7 +447,7 @@ export function createDoorDashApp({
           ? "The order was submitted but is not confirmed successful. Follow the returned status instructions."
           : terminalStatus === "successful"
             ? null
-            : "The order was submitted but is still pending. Check doordash_order_status before reporting success.");
+            : "The order was submitted but is still pending. Check order_status before reporting success.");
       const projected = projectWithContract(contracts.orderSubmit, {
         submitted,
         preview,
@@ -482,6 +487,9 @@ export function createDoorDashApp({
   const nodeHandler = toNodeHandler(mcpHandler);
   const app = express();
   app.use(express.json());
+  const adminAuth = createAdminAuth({
+    accessToken: adminAccessToken
+  });
   const bearerAuth = requireBearerAuth({
     verifier: createTokenVerifier(securityStore),
     requiredScopes: ["doordash:tools"]
@@ -505,6 +513,27 @@ export function createDoorDashApp({
     res.set("Cache-Control", "no-store");
     next();
   });
+
+  app.get("/styles.css", (_req, res) => {
+    res.sendFile(STYLES_PATH);
+  });
+
+  app.get("/login.js", (_req, res) => {
+    res.sendFile(LOGIN_SCRIPT_PATH);
+  });
+
+  app.get("/login", adminAuth.redirectAuthenticated, (_req, res) => {
+    res.sendFile(LOGIN_PATH);
+  });
+
+  app.post("/api/admin/session", requireJson, adminAuth.login);
+  app.delete(
+    "/api/admin/session",
+    adminAuth.requireAdmin,
+    adminAuth.logout
+  );
+
+  app.use(adminAuth.requireAdmin);
 
   app.get("/api/status", (_req, res) => {
     res.json({

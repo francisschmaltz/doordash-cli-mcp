@@ -10,6 +10,13 @@ import {
 } from "../src/response-contract.js";
 import { SecurityStore } from "../src/security-store.js";
 
+function createTestApp(options) {
+  return createDoorDashApp({
+    adminAccessToken: "test-admin-secret",
+    ...options
+  });
+}
+
 function orderItems() {
   return [
     {
@@ -322,7 +329,7 @@ test("submit recognizes a nested terminal order status at app level", async () =
     scopes: tokenRecord.scopes,
     expiresAt: tokenRecord.expiresAt
   };
-  const { mcpHandler } = createDoorDashApp({
+  const { mcpHandler } = createTestApp({
     securityStore,
     pollDelay: async () => {},
     runCli: async (args) => {
@@ -368,7 +375,7 @@ test("submit recognizes a nested terminal order status at app level", async () =
       auth,
       "tools/call",
       {
-        name: "doordash_order_submit",
+        name: "order_submit",
         arguments: {
           cartUuid: "cart-1",
           expectedTotalBeforeTipCents: 2500,
