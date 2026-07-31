@@ -57,20 +57,43 @@ const verticalSchema = z.enum([
   "nv"
 ]);
 
-const nestedOptionSchema = z.lazy(() =>
-  z.object({
-    id: idSchema,
-    name: z.string().min(1).max(500),
-    quantity: z.number().int().min(1).default(1),
-    options: z.array(nestedOptionSchema).max(50).optional()
-  })
+const selectedCartOptionSchema = z.lazy(() =>
+  z
+    .object({
+      id: idSchema.describe(
+        "A selected option_id from a modifier group. Never pass the modifier group's group_id or extra_id."
+      ),
+      name: z
+        .string()
+        .min(1)
+        .max(500)
+        .describe("The selected option name returned with option_id."),
+      quantity: z.number().int().min(1).default(1),
+      options: z
+        .array(selectedCartOptionSchema)
+        .max(50)
+        .optional()
+        .describe(
+          "Only for a selected option that itself exposes nested modifier groups: include the selected child options here."
+        )
+    })
+    .refine((option) => !option.id.startsWith("e_"), {
+      message:
+        "nestedOptions entries must be selected option IDs, not modifier-group IDs such as e_...."
+    })
 );
 
 const cartItemSchema = z.object({
   itemId: idSchema,
   itemName: z.string().min(1).max(500),
   quantity: z.number().positive().max(10_000).default(1),
-  nestedOptions: z.array(nestedOptionSchema).max(100).optional()
+  nestedOptions: z
+    .array(selectedCartOptionSchema)
+    .max(100)
+    .optional()
+    .describe(
+      "Selected options only. Include enough option_id entries to satisfy every modifier group whose min_selections is greater than zero. Keep ordinary selections in this top-level list; never include group_id or extra_id nodes."
+    )
 });
 
 const previewOptionsSchema = {
@@ -237,7 +260,7 @@ export function registerDoorDashTools(server, context) {
     {
       title: "Get DoorDash Restaurant Menu",
       description:
-        "Return a restaurant menu and menu ID. Use item details before adding anything with required modifiers.",
+        "Return a restaurant menu and menu ID. Before adding an item, inspect every modifier group. If any group has min_selections greater than zero, get item details and select enough options to satisfy every required group.",
       inputSchema: z.object({
         storeId: idSchema
       }),
@@ -252,7 +275,7 @@ export function registerDoorDashTools(server, context) {
     {
       title: "Get DoorDash Restaurant Item Details",
       description:
-        "Return restaurant item pricing and recursive required or optional modifier choices.",
+        "Return restaurant item pricing and recursive modifier choices. Modifier groups describe constraints and must not be sent as cart selections. For add_cart_items, send the chosen option_id nodes only and satisfy every group whose min_selections is greater than zero.",
       inputSchema: z.object({
         storeId: idSchema,
         menuId: idSchema,
@@ -310,7 +333,7 @@ export function registerDoorDashTools(server, context) {
     {
       title: "Add DoorDash Cart Items",
       description:
-        "Add items to a restaurant or retail cart. Delivery uses the account-wide default DoorDash address; there is no per-cart address input. Quantities are additive and this is not idempotent. Check same-store carts first; partial failures may still add some items.",
+        "Add items to a restaurant or retail cart, then automatically return a browser checkout_url whenever the cart contains added items. Before calling, inspect item details and include selected option_id entries for every modifier group whose min_selections is greater than zero. nestedOptions contains selected options only: keep ordinary selections flat, never pass group_id or extra_id nodes such as e_..., and use recursive options only when a selected option exposes its own nested modifier groups. Delivery uses the account-wide default DoorDash address; there is no per-cart address input. Quantities are additive and this is not idempotent. Check same-store carts first; partial failures may still add some items.",
       inputSchema: z
         .object({
           storeId: idSchema,
@@ -340,7 +363,7 @@ export function registerDoorDashTools(server, context) {
         idempotent: false
       })
     },
-    async (input) => context.invoke(addCartItemsArgs(input))
+    async (input) => context.addCartItems(input)
   );
 
   register(

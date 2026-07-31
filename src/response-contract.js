@@ -2505,7 +2505,7 @@ export function summarizeResponse(value) {
       return `Resolved ${plural(value.items.length, "grocery item")}${value.store?.name ? ` at ${value.store.name}` : ""}.`;
     case "cart": {
       const errors = value.item_errors?.length || 0;
-      return `${plural(value.items.length, "cart line")}${value.store?.name ? ` at ${value.store.name}` : ""}${errors ? `; ${plural(errors, "item")} still need${errors === 1 ? "s" : ""} attention` : ""}.`;
+      return `${plural(value.items.length, "cart line")}${value.store?.name ? ` at ${value.store.name}` : ""}${errors ? `; ${plural(errors, "item")} still need${errors === 1 ? "s" : ""} attention` : ""}${value.checkout_url ? `. Checkout: ${value.checkout_url}` : "."}`;
     }
     case "cart_list":
       return `${plural(value.carts.length, "active DoorDash cart")}.`;

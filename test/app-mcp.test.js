@@ -159,6 +159,254 @@ test("discovery coordinates are optional and document the default-address fallba
   store.close();
 });
 
+test("cart tools instruct callers to satisfy required options and return checkout", async () => {
+  const store = new SecurityStore({ databasePath: ":memory:" });
+  const token = store.createToken({
+    name: "Open WebUI",
+    allowPurchases: false
+  });
+  const { mcpHandler } = createTestApp({
+    securityStore: store,
+    runCli: async () => {
+      throw new Error("CLI should not run during tools/list.");
+    }
+  });
+
+  const response = await mcpRequest(
+    mcpHandler,
+    authInfo(store, token.token),
+    "tools/list",
+    {}
+  );
+  const addTool = response.body.result.tools.find(
+    (tool) => tool.name === "add_cart_items"
+  );
+  const detailTool = response.body.result.tools.find(
+    (tool) => tool.name === "get_restaurant_item_details"
+  );
+
+  assert.ok(addTool);
+  assert.match(addTool.description, /every modifier group/);
+  assert.match(addTool.description, /selected option_id/);
+  assert.match(addTool.description, /never pass group_id or extra_id/);
+  assert.match(addTool.description, /automatically return.*checkout_url/);
+  assert.ok(detailTool);
+  assert.match(detailTool.description, /must not be sent as cart selections/);
+
+  await mcpHandler.close();
+  store.close();
+});
+
+test("add cart returns a checkout URL after adding fully selected items", async () => {
+  const store = new SecurityStore({ databasePath: ":memory:" });
+  const token = store.createToken({
+    name: "Open WebUI",
+    allowPurchases: false
+  });
+  const calls = [];
+  const { mcpHandler } = createTestApp({
+    securityStore: store,
+    runCli: async (args) => {
+      calls.push(args);
+      if (args[0] === "cart" && args[1] === "add-items") {
+        return cliResult({
+          success: true,
+          cart_uuid: "cart-1",
+          cart: {
+            id: "cart-1",
+            store_id: "store-1",
+            store_name: "Mercado",
+            items: [
+              {
+                id: "line-1",
+                item_id: "10523709271",
+                name: "Enchiladas Verdes",
+                quantity: 2
+              }
+            ]
+          }
+        });
+      }
+      if (args[0] === "order" && args[1] === "checkout-url") {
+        return cliResult({
+          cart_uuid: "cart-1",
+          checkout_url: "https://www.doordash.test/checkout/cart-1"
+        });
+      }
+      throw new Error(`Unexpected CLI call: ${args.join(" ")}`);
+    }
+  });
+
+  const response = await mcpRequest(
+    mcpHandler,
+    authInfo(store, token.token),
+    "tools/call",
+    {
+      name: "add_cart_items",
+      arguments: {
+        storeId: "store-1",
+        menuId: "menu-1",
+        items: [
+          {
+            itemId: "i_10523709271",
+            itemName: "Enchiladas Verdes",
+            quantity: 2,
+            nestedOptions: [
+              {
+                id: "o_31172333376",
+                name: "Oaxacan Refried Black"
+              },
+              {
+                id: "o_42978512124",
+                name: "Rotisserie Chicken"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  );
+
+  assert.equal(response.body.result.isError, undefined);
+  assert.equal(
+    response.body.result.structuredContent.checkout_url,
+    "https://www.doordash.test/checkout/cart-1"
+  );
+  assert.match(
+    response.body.result.content[0].text,
+    /Checkout: https:\/\/www\.doordash\.test\/checkout\/cart-1/
+  );
+  assert.deepEqual(
+    calls.map((args) => args.slice(0, 2)),
+    [
+      ["cart", "add-items"],
+      ["order", "checkout-url"]
+    ]
+  );
+  const requestedItems = JSON.parse(
+    calls[0][calls[0].indexOf("--items-json") + 1]
+  );
+  assert.deepEqual(
+    requestedItems[0].nested_options.map((option) => option.id),
+    ["o_31172333376", "o_42978512124"]
+  );
+
+  await mcpHandler.close();
+  store.close();
+});
+
+test("add cart preserves successful items when checkout link creation fails", async () => {
+  const store = new SecurityStore({ databasePath: ":memory:" });
+  const token = store.createToken({
+    name: "Open WebUI",
+    allowPurchases: false
+  });
+  const { mcpHandler } = createTestApp({
+    securityStore: store,
+    runCli: async (args) => {
+      if (args[0] === "cart" && args[1] === "add-items") {
+        return cliResult({
+          success: true,
+          cart_uuid: "cart-1",
+          cart: {
+            id: "cart-1",
+            items: [
+              {
+                id: "line-1",
+                item_id: "item-1",
+                name: "Item",
+                quantity: 1
+              }
+            ]
+          }
+        });
+      }
+      throw new Error("Checkout link unavailable.");
+    }
+  });
+
+  const response = await mcpRequest(
+    mcpHandler,
+    authInfo(store, token.token),
+    "tools/call",
+    {
+      name: "add_cart_items",
+      arguments: {
+        storeId: "store-1",
+        menuId: "menu-1",
+        items: [
+          {
+            itemId: "item-1",
+            itemName: "Item"
+          }
+        ]
+      }
+    }
+  );
+
+  assert.equal(response.body.result.isError, undefined);
+  assert.equal(response.body.result.structuredContent.items.length, 1);
+  assert.equal(
+    response.body.result.structuredContent.checkout_url,
+    undefined
+  );
+  assert.match(
+    response.body.result.structuredContent.warnings[0],
+    /create_checkout_link/
+  );
+
+  await mcpHandler.close();
+  store.close();
+});
+
+test("add cart rejects modifier-group IDs as selected options", async () => {
+  const store = new SecurityStore({ databasePath: ":memory:" });
+  const token = store.createToken({
+    name: "Open WebUI",
+    allowPurchases: false
+  });
+  let cliCalls = 0;
+  const { mcpHandler } = createTestApp({
+    securityStore: store,
+    runCli: async () => {
+      cliCalls += 1;
+      return cliResult({});
+    }
+  });
+
+  const response = await mcpRequest(
+    mcpHandler,
+    authInfo(store, token.token),
+    "tools/call",
+    {
+      name: "add_cart_items",
+      arguments: {
+        storeId: "store-1",
+        menuId: "menu-1",
+        items: [
+          {
+            itemId: "item-1",
+            itemName: "Item",
+            nestedOptions: [
+              {
+                id: "e_7116953698",
+                name: "CHOICE of BEANS"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  );
+
+  assert.equal(response.body.result.isError, true);
+  assert.match(response.body.result.content[0].text, /modifier-group IDs/);
+  assert.equal(cliCalls, 0);
+
+  await mcpHandler.close();
+  store.close();
+});
+
 test("discovery tools resolve omitted coordinates from the default address", async () => {
   const store = new SecurityStore({ databasePath: ":memory:" });
   const token = store.createToken({

@@ -397,6 +397,30 @@ test("partial cart additions preserve successful items and required choices", ()
   );
 });
 
+test("cart projections preserve the checkout URL", () => {
+  const projected = projectWithContract(contracts.cart, {
+    success: true,
+    cart_uuid: "cart-1",
+    checkout_url: "https://www.doordash.test/checkout/cart-1",
+    cart: {
+      id: "cart-1",
+      items: [
+        {
+          id: "line-1",
+          item_id: "item-1",
+          name: "Item",
+          quantity: 1
+        }
+      ]
+    }
+  });
+
+  assert.equal(
+    projected.checkout_url,
+    "https://www.doordash.test/checkout/cart-1"
+  );
+});
+
 test("upstream structural drift becomes a typed contract error", () => {
   assert.throws(
     () => projectWithContract(contracts.storeSearch, { success: true }),

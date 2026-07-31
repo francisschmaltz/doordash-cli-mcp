@@ -81,7 +81,7 @@ advertised as a stable typed contract.
 | `store_details` | `store` |
 | `menu` | Store, `menu_id`, `items`, optional categories and truncation |
 | `item_details` | Store, `menu_id`, and `item` |
-| `cart` | Cart ID, store, items, fulfillment, optional links and item errors |
+| `cart` | Cart ID, store, items, fulfillment, checkout link, and optional item errors |
 | `cart_list` | `carts` and optional `truncation` |
 | `cart_mutation` | Optional `resource_id` and `message` |
 | `checkout_link` | Cart ID and upstream `checkout_url` |
@@ -200,19 +200,20 @@ advertised as a stable typed contract.
 
 ## Partial cart addition
 
-Successful lines stay in `items`. Lines that still need a choice appear once
-in `item_errors`; there is no second status envelope describing the same fact.
+Successful lines stay in `items` and receive a `checkout_url`. Lines that still
+need a choice appear once in `item_errors`; there is no second status envelope
+describing the same fact.
 
 ```json
 {
   "content": [
     {
       "type": "text",
-      "text": "1 cart line at Example Pizza; 1 item still needs attention."
+      "text": "1 cart line at Example Pizza; 1 item still needs attention. Checkout: https://www.doordash.com/checkout/cart-123"
     },
     {
       "type": "text",
-      "text": "{\"schema\":\"doordash-cli\",\"version\":1,\"kind\":\"cart\",\"cart_uuid\":\"cart-123\",\"store\":{\"store_id\":\"928163\",\"name\":\"Example Pizza\"},\"items\":[{\"item_id\":\"23266866023\",\"cart_item_id\":\"line-1\",\"name\":\"Margherita Pizza\",\"quantity\":1,\"price\":18.99}],\"fulfillment\":\"delivery\",\"group_cart_url\":\"https://www.doordash.com/group-orders/cart-123\",\"item_errors\":[{\"item\":{\"item_id\":\"combo-1\",\"name\":\"Pizza Combo\",\"quantity\":1},\"message\":\"Choose a size.\",\"modifier_groups\":[{\"group_id\":\"size\",\"name\":\"Size\",\"min_selections\":1,\"max_selections\":1,\"options\":[{\"option_id\":\"small\",\"name\":\"Small\",\"price\":0},{\"option_id\":\"large\",\"name\":\"Large\",\"price\":1.5}]}]}]}"
+      "text": "{\"schema\":\"doordash-cli\",\"version\":1,\"kind\":\"cart\",\"cart_uuid\":\"cart-123\",\"store\":{\"store_id\":\"928163\",\"name\":\"Example Pizza\"},\"items\":[{\"item_id\":\"23266866023\",\"cart_item_id\":\"line-1\",\"name\":\"Margherita Pizza\",\"quantity\":1,\"price\":18.99}],\"fulfillment\":\"delivery\",\"group_cart_url\":\"https://www.doordash.com/group-orders/cart-123\",\"item_errors\":[{\"item\":{\"item_id\":\"combo-1\",\"name\":\"Pizza Combo\",\"quantity\":1},\"message\":\"Choose a size.\",\"modifier_groups\":[{\"group_id\":\"size\",\"name\":\"Size\",\"min_selections\":1,\"max_selections\":1,\"options\":[{\"option_id\":\"small\",\"name\":\"Small\",\"price\":0},{\"option_id\":\"large\",\"name\":\"Large\",\"price\":1.5}]}]}],\"checkout_url\":\"https://www.doordash.com/checkout/cart-123\"}"
     }
   ],
   "structuredContent": {
@@ -264,7 +265,8 @@ in `item_errors`; there is no second status envelope describing the same fact.
           }
         ]
       }
-    ]
+    ],
+    "checkout_url": "https://www.doordash.com/checkout/cart-123"
   }
 }
 ```

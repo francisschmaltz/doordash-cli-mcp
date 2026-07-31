@@ -10,6 +10,8 @@ import { ActivityLog } from "./activity-log.js";
 import { createAdminAuth } from "./admin-auth.js";
 import { createTokenVerifier } from "./auth.js";
 import {
+  addCartItemsArgs,
+  checkoutLinkArgs,
   listAddressesArgs,
   listPaymentMethodsArgs,
   orderStatusArgs,
@@ -345,6 +347,50 @@ export function createDoorDashApp({
     }
   }
 
+  async function addCartItems(input) {
+    try {
+      const addResult = await executeCli(addCartItemsArgs(input), {
+        project: (data) => data,
+        activityProject: (data) => projectWithContract(contracts.cart, data),
+        activityContract: contracts.cart
+      });
+      let projected = projectWithContract(contracts.cart, addResult);
+
+      if (!projected.cart_uuid || projected.items.length === 0) {
+        return toToolResult(projected);
+      }
+
+      try {
+        const checkout = await executeCli(
+          checkoutLinkArgs({ cartUuid: projected.cart_uuid }),
+          {
+            project: (data) =>
+              projectWithContract(contracts.checkoutLink, data),
+            activityProject: (data) =>
+              projectWithContract(contracts.checkoutLink, data),
+            activityContract: contracts.checkoutLink
+          }
+        );
+        projected = contracts.cart.outputSchema.parse({
+          ...projected,
+          checkout_url: checkout.checkout_url
+        });
+      } catch {
+        projected = contracts.cart.outputSchema.parse({
+          ...projected,
+          warnings: [
+            ...(projected.warnings || []),
+            "Items were added, but DoorDash did not return a checkout URL. Call create_checkout_link with this cart_uuid."
+          ]
+        });
+      }
+
+      return toToolResult(projected);
+    } catch (error) {
+      return toolError(error, contracts.cart);
+    }
+  }
+
   async function submitOrder(input, authInfo) {
     try {
       assertCurrentPurchaseAccess(securityStore, authInfo);
@@ -530,6 +576,7 @@ export function createDoorDashApp({
     registerDoorDashTools(server, {
       activityLog,
       authInfo,
+      addCartItems,
       invoke: (args, options) => invoke(args, options, authInfo),
       invokeWithDefaultAddressLocation: (input, buildArgs) =>
         invokeWithDefaultAddressLocation(input, buildArgs, authInfo),

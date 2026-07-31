@@ -168,7 +168,16 @@ DoorDash has no marked default or the default has no coordinates.
 - `delete_cart`
 
 The add operation is additive and non-idempotent. It supports delivery/pickup,
-recursive modifiers, group carts, and participant spending limits.
+recursive modifiers, group carts, and participant spending limits. Before
+adding an item, satisfy every modifier group whose `min_selections` is greater
+than zero. Pass selected option IDs in `nestedOptions`; do not pass modifier
+group IDs such as `e_...`. Ordinary selections stay flat, while `options` is
+only for choices that expose another nested modifier group.
+
+After a successful add, `add_cart_items` automatically creates and returns a
+browser `checkout_url`. If DoorDash adds the items but link creation fails, the
+tool preserves the cart result and tells the caller to use
+`create_checkout_link`.
 
 ### Orders
 
