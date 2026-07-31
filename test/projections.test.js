@@ -8,10 +8,6 @@ import {
   money,
   projectWithContract
 } from "../src/response-contract.js";
-import {
-  redactForActivity,
-  sanitizeCommandForActivity
-} from "../src/projections.js";
 
 test("typed CLI commands resolve to their advertised response families", () => {
   assert.equal(
@@ -505,65 +501,4 @@ test("payment projection omits internal payment identifiers", () => {
   assert.equal("default_card" in projected, false);
   assert.equal(JSON.stringify(projected).includes("pm-default"), false);
   assert.equal(JSON.stringify(projected).includes("provider-secret"), false);
-});
-
-test("activity redacts sensitive response keys, links, and command flags", () => {
-  assert.deepEqual(
-    redactForActivity({
-      email: "person@example.com",
-      delivery_address: {
-        printable_address: "1 Main St",
-        city: "Oakland"
-      },
-      cards: [{ last4: "4242", payment_method_id: "secret" }],
-      checkout_url: "https://doordash.example/checkout-secret",
-      tracking_url: "https://doordash.example/tracking-secret",
-      group_cart_url: "https://doordash.example/group-secret",
-      message:
-        "Continue at https://doordash.example/private from 1 Main St, Oakland.",
-      warnings: ["Tracking link: https://doordash.example/private"],
-      note: "Open https://doordash.example/private"
-    }),
-    {
-      email: "[redacted]",
-      delivery_address: {
-        printable_address: "[redacted]",
-        city: "Oakland"
-      },
-      cards: [{ last4: "[redacted]", payment_method_id: "[redacted]" }],
-      checkout_url: "[redacted]",
-      tracking_url: "[redacted]",
-      group_cart_url: "[redacted]",
-      message: "[redacted]",
-      warnings: ["[redacted]"],
-      note: "Open [redacted-url]"
-    }
-  );
-
-  assert.deepEqual(
-    sanitizeCommandForActivity([
-      "order",
-      "submit",
-      "--team-id",
-      "secret-team",
-      "--lat",
-      "37.831",
-      "--lng",
-      "-122.219",
-      "--cart-uuid",
-      "cart-1"
-    ]),
-    [
-      "order",
-      "submit",
-      "--team-id",
-      "[redacted]",
-      "--lat",
-      "[redacted]",
-      "--lng",
-      "[redacted]",
-      "--cart-uuid",
-      "cart-1"
-    ]
-  );
 });

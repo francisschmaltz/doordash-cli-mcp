@@ -31,22 +31,6 @@ import { hasPurchaseAccess } from "./auth.js";
 import { contractForTool, contracts } from "./response-contract.js";
 
 const idSchema = z.string().min(1).max(128);
-const latitudeSchema = z
-  .number()
-  .finite()
-  .min(-90)
-  .max(90)
-  .describe(
-    "Optional latitude. Provide it with lng to override the default saved DoorDash address; omit both to use that default address."
-  );
-const longitudeSchema = z
-  .number()
-  .finite()
-  .min(-180)
-  .max(180)
-  .describe(
-    "Optional longitude. Provide it with lat to override the default saved DoorDash address; omit both to use that default address."
-  );
 const fulfillmentSchema = z.enum(["delivery", "pickup"]);
 const verticalSchema = z.enum([
   "grocery",
@@ -218,24 +202,15 @@ export function registerDoorDashTools(server, context) {
     {
       title: "Find Nearby DoorDash Stores",
       description:
-        "Discover grocery, retail, convenience, pet, alcohol, or NV stores. lat and lng are optional but must be supplied together. When omitted, this tool resolves coordinates from list_addresses using the account-wide default. Explicit coordinates affect discovery only; delivery still uses the account default address.",
-      inputSchema: z
-        .object({
-          vertical: verticalSchema,
-          max: z.number().int().min(1).max(100).default(25),
-          lat: latitudeSchema.optional(),
-          lng: longitudeSchema.optional()
-        })
-        .refine(
-          (value) =>
-            (value.lat === undefined && value.lng === undefined) ||
-            (value.lat !== undefined && value.lng !== undefined),
-          { message: "lat and lng must be provided together." }
-        ),
+        "Discover grocery, retail, convenience, pet, alcohol, or NV stores using the account-wide default saved DoorDash address. This tool always resolves that address through list_addresses and does not accept a location override.",
+      inputSchema: z.object({
+        vertical: verticalSchema,
+        max: z.number().int().min(1).max(100).default(25)
+      }),
       annotations: annotations({ readOnly: true })
     },
     async (input) =>
-      context.invokeWithDefaultAddressLocation(input, findNearbyStoresArgs)
+      context.invokeAtDefaultAddress(input, findNearbyStoresArgs)
   );
 
   register(
@@ -292,24 +267,15 @@ export function registerDoorDashTools(server, context) {
     {
       title: "Search DoorDash Restaurants",
       description:
-        "Find nearby restaurants. lat and lng are optional but must be supplied together. When omitted, this tool resolves coordinates from list_addresses using the account-wide default; provide both to search somewhere else.",
-      inputSchema: z
-        .object({
-          query: z.string().min(1).max(500),
-          lat: latitudeSchema.optional(),
-          lng: longitudeSchema.optional(),
-          limit: z.number().int().min(1).max(50).default(10)
-        })
-        .refine(
-          (value) =>
-            (value.lat === undefined && value.lng === undefined) ||
-            (value.lat !== undefined && value.lng !== undefined),
-          { message: "lat and lng must be provided together." }
-        ),
+        "Find nearby restaurants using the account-wide default saved DoorDash address. This tool always resolves that address through list_addresses and does not accept a location override.",
+      inputSchema: z.object({
+        query: z.string().min(1).max(500),
+        limit: z.number().int().min(1).max(50).default(10)
+      }),
       annotations: annotations({ readOnly: true })
     },
     async (input) =>
-      context.invokeWithDefaultAddressLocation(input, searchRestaurantsArgs)
+      context.invokeAtDefaultAddress(input, searchRestaurantsArgs)
   );
 
   register(
@@ -653,7 +619,7 @@ export function registerDoorDashTools(server, context) {
     {
       title: "DoorDash Activity",
       description:
-        "Return recent MCP-routed DoorDash CLI calls and redacted results, newest first.",
+        "Return recent MCP-routed DoorDash CLI calls and complete unredacted results, newest first.",
       inputSchema: z.object({
         limit: z.number().int().min(1).max(100).default(20)
       }),

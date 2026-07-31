@@ -125,7 +125,7 @@ test("purchase tools appear only for tokens with the checkbox enabled", async ()
   store.close();
 });
 
-test("discovery coordinates are optional and document the default-address fallback", async () => {
+test("discovery exposes no location override and documents the default address", async () => {
   const store = new SecurityStore({ databasePath: ":memory:" });
   const token = store.createToken({
     name: "Open WebUI",
@@ -148,11 +148,10 @@ test("discovery coordinates are optional and document the default-address fallba
   for (const name of ["search_restaurants", "find_nearby_stores"]) {
     const tool = response.body.result.tools.find((entry) => entry.name === name);
     assert.ok(tool);
-    assert.equal(tool.inputSchema.required?.includes("lat") ?? false, false);
-    assert.equal(tool.inputSchema.required?.includes("lng") ?? false, false);
+    assert.equal("lat" in tool.inputSchema.properties, false);
+    assert.equal("lng" in tool.inputSchema.properties, false);
     assert.match(tool.description, /list_addresses/);
-    assert.match(tool.inputSchema.properties.lat.description, /omit both/);
-    assert.match(tool.inputSchema.properties.lng.description, /omit both/);
+    assert.match(tool.description, /does not accept a location override/);
   }
 
   await mcpHandler.close();
@@ -500,7 +499,79 @@ test("discovery tools resolve omitted coordinates from the default address", asy
   store.close();
 });
 
-test("explicit discovery coordinates skip default-address lookup", async () => {
+test("activity keeps default-address commands and CLI results completely raw", async () => {
+  const store = new SecurityStore({ databasePath: ":memory:" });
+  const token = store.createToken({
+    name: "Open WebUI",
+    allowPurchases: false
+  });
+  const { mcpHandler, activityLog } = createTestApp({
+    securityStore: store,
+    runCli: async (args) => {
+      if (args[0] === "address" && args[1] === "list") {
+        return cliResult({
+          addresses: [
+            {
+              id: "address-default",
+              printable_address: "21 Bay Forest Dr",
+              latitude: 37.831,
+              longitude: -122.219,
+              is_default: true,
+              upstream_private: "keep this too"
+            }
+          ]
+        });
+      }
+      return cliResult({
+        stores: [],
+        requested_latitude: 37.831,
+        requested_longitude: -122.219,
+        upstream_private: "do not redact or normalize me"
+      });
+    }
+  });
+
+  const response = await mcpRequest(
+    mcpHandler,
+    authInfo(store, token.token),
+    "tools/call",
+    {
+      name: "search_restaurants",
+      arguments: {
+        query: "pizza"
+      }
+    }
+  );
+
+  assert.equal(response.body.result.isError, undefined);
+  const [searchEntry, addressEntry] = activityLog.list(2);
+  assert.equal(
+    searchEntry.command[searchEntry.command.indexOf("--lat") + 1],
+    "37.831"
+  );
+  assert.equal(
+    searchEntry.command[searchEntry.command.indexOf("--lng") + 1],
+    "-122.219"
+  );
+  assert.equal(
+    searchEntry.result.upstream_private,
+    "do not redact or normalize me"
+  );
+  assert.equal(searchEntry.result.requested_latitude, 37.831);
+  assert.equal(
+    addressEntry.result.addresses[0].printable_address,
+    "21 Bay Forest Dr"
+  );
+  assert.equal(
+    addressEntry.result.addresses[0].upstream_private,
+    "keep this too"
+  );
+
+  await mcpHandler.close();
+  store.close();
+});
+
+test("stale discovery coordinates cannot bypass default-address lookup", async () => {
   const store = new SecurityStore({ databasePath: ":memory:" });
   const token = store.createToken({
     name: "Open WebUI",
@@ -511,6 +582,19 @@ test("explicit discovery coordinates skip default-address lookup", async () => {
     securityStore: store,
     runCli: async (args) => {
       calls.push(args);
+      if (args[0] === "address" && args[1] === "list") {
+        return cliResult({
+          addresses: [
+            {
+              id: "address-default",
+              printable_address: "21 Bay Forest Dr",
+              latitude: 37.831,
+              longitude: -122.219,
+              is_default: true
+            }
+          ]
+        });
+      }
       return cliResult({ stores: [] });
     }
   });
@@ -531,14 +615,21 @@ test("explicit discovery coordinates skip default-address lookup", async () => {
   );
 
   assert.equal(response.body.result.isError, undefined);
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0][0], "search");
+  assert.deepEqual(
+    calls.map((args) => args.slice(0, 2)),
+    [
+      ["address", "list"],
+      ["search", "--query"]
+    ]
+  );
+  assert.equal(calls[1][calls[1].indexOf("--lat") + 1], "37.831");
+  assert.equal(calls[1][calls[1].indexOf("--lng") + 1], "-122.219");
 
   await mcpHandler.close();
   store.close();
 });
 
-test("omitted discovery coordinates fail clearly without a usable default address", async () => {
+test("discovery fails clearly without a usable default address", async () => {
   const store = new SecurityStore({ databasePath: ":memory:" });
   const token = store.createToken({
     name: "Open WebUI",
@@ -667,8 +758,21 @@ test("typed tools return concise text and normalized structured content", async 
   });
   const { mcpHandler } = createTestApp({
     securityStore: store,
-    runCli: async () =>
-      cliResult({
+    runCli: async (args) => {
+      if (args[0] === "address" && args[1] === "list") {
+        return cliResult({
+          addresses: [
+            {
+              id: "address-default",
+              printable_address: "21 Bay Forest Dr",
+              latitude: 37.831,
+              longitude: -122.219,
+              is_default: true
+            }
+          ]
+        });
+      }
+      return cliResult({
         success: true,
         upstream_only: "discard me",
         stores: [
@@ -679,7 +783,8 @@ test("typed tools return concise text and normalized structured content", async 
             delivery_time: "25-35 min"
           }
         ]
-      })
+      });
+    }
   });
 
   const response = await mcpRequest(
@@ -690,8 +795,6 @@ test("typed tools return concise text and normalized structured content", async 
       name: "search_restaurants",
       arguments: {
         query: "pizza",
-        lat: 37.8,
-        lng: -122.2,
         limit: 10
       }
     }
@@ -740,7 +843,22 @@ test("malformed upstream data is a typed MCP error, not an empty result", async 
   });
   const { mcpHandler } = createTestApp({
     securityStore: store,
-    runCli: async () => cliResult({ success: true })
+    runCli: async (args) => {
+      if (args[0] === "address" && args[1] === "list") {
+        return cliResult({
+          addresses: [
+            {
+              id: "address-default",
+              printable_address: "21 Bay Forest Dr",
+              latitude: 37.831,
+              longitude: -122.219,
+              is_default: true
+            }
+          ]
+        });
+      }
+      return cliResult({ success: true });
+    }
   });
 
   const response = await mcpRequest(
@@ -751,8 +869,6 @@ test("malformed upstream data is a typed MCP error, not an empty result", async 
       name: "search_restaurants",
       arguments: {
         query: "pizza",
-        lat: 37.8,
-        lng: -122.2,
         limit: 10
       }
     }

@@ -26,10 +26,6 @@ import {
   runDoorDashCli
 } from "./dd-cli.js";
 import {
-  redactForActivity,
-  sanitizeCommandForActivity
-} from "./projections.js";
-import {
   contractForCommand,
   contracts,
   errorEnvelope,
@@ -43,7 +39,7 @@ const PUBLIC_DIR = path.resolve(SOURCE_DIR, "..", "public");
 const LOGIN_PATH = path.join(PUBLIC_DIR, "login.html");
 const LOGIN_SCRIPT_PATH = path.join(PUBLIC_DIR, "login.js");
 const STYLES_PATH = path.join(PUBLIC_DIR, "styles.css");
-const SERVER_VERSION = "0.3.0";
+const SERVER_VERSION = "0.4.0";
 const TERMINAL_ORDER_STATUSES = new Set([
   "successful",
   "action_required",
@@ -54,7 +50,7 @@ const TERMINAL_ORDER_STATUSES = new Set([
 function safeErrorResult(error) {
   const details =
     error instanceof DoorDashCliError
-      ? redactForActivity(error.details)
+      ? error.details
       : {};
   return {
     error: error instanceof Error ? error.message : String(error),
@@ -64,17 +60,6 @@ function safeErrorResult(error) {
 
 function toolError(error, contract) {
   return toToolResult(errorEnvelope(contract, error), { isError: true });
-}
-
-function activityErrorResult(error, contract) {
-  if (!contract) {
-    return safeErrorResult(error);
-  }
-  try {
-    return errorEnvelope(contract, error);
-  } catch {
-    return safeErrorResult(error);
-  }
 }
 
 function normalizedAddress(value) {
@@ -103,7 +88,7 @@ function defaultAddressCoordinates(addressList) {
   );
   if (!defaultAddress) {
     throw new DoorDashCliError(
-      "DoorDash did not identify a default saved address. Pass lat and lng together, or set a default address first."
+      "DoorDash did not identify a default saved address. Set a default address in DoorDash first."
     );
   }
 
@@ -112,7 +97,7 @@ function defaultAddressCoordinates(addressList) {
     !Number.isFinite(defaultAddress.longitude)
   ) {
     throw new DoorDashCliError(
-      "The default DoorDash address has no usable coordinates. Pass lat and lng together, or update the default address in DoorDash."
+      "The default DoorDash address has no usable coordinates. Update the default address in DoorDash."
     );
   }
 
@@ -266,13 +251,12 @@ export function createDoorDashApp({
     {
       allowPurchases = false,
       generic = false,
-      project = (data) => data,
-      activityProject = project,
-      activityContract = null
+      project = (data) => data
     } = {}
   ) {
     const command = buildCliArguments(args);
-    const pending = activityLog.start(sanitizeCommandForActivity(command));
+    const pending = activityLog.start(command);
+    let data;
 
     try {
       if (generic) {
@@ -283,17 +267,19 @@ export function createDoorDashApp({
         allowPurchases,
         timeoutMs: cliTimeoutMs
       });
-      const data = extractCliStructuredContent(execution);
+      data = extractCliStructuredContent(execution);
       const output = project(data);
-      activityLog.succeed(
-        pending,
-        redactForActivity(activityProject(data))
-      );
+      activityLog.succeed(pending, data);
       return output;
     } catch (error) {
       activityLog.fail(
         pending,
-        redactForActivity(activityErrorResult(error, activityContract))
+        data === undefined
+          ? safeErrorResult(error)
+          : {
+              data,
+              projection_error: safeErrorResult(error)
+            }
       );
       throw error;
     }
@@ -307,9 +293,7 @@ export function createDoorDashApp({
       }
       const projected = await executeCli(args, {
         ...options,
-        project: (data) => projectWithContract(contract, data),
-        activityProject: (data) => projectWithContract(contract, data),
-        activityContract: contract
+        project: (data) => projectWithContract(contract, data)
       });
       return toToolResult(projected);
     } catch (error) {
@@ -317,21 +301,14 @@ export function createDoorDashApp({
     }
   }
 
-  async function invokeWithDefaultAddressLocation(
+  async function invokeAtDefaultAddress(
     input,
     buildArgs,
     authInfo
   ) {
-    if (input.lat !== undefined && input.lng !== undefined) {
-      return invoke(buildArgs(input), {}, authInfo);
-    }
-
     try {
       const addresses = await executeCli(listAddressesArgs(), {
-        project: (data) => projectWithContract(contracts.addresses, data),
-        activityProject: (data) =>
-          projectWithContract(contracts.addresses, data),
-        activityContract: contracts.addresses
+        project: (data) => projectWithContract(contracts.addresses, data)
       });
       const coordinates = defaultAddressCoordinates(addresses);
       return invoke(
@@ -350,9 +327,7 @@ export function createDoorDashApp({
   async function addCartItems(input) {
     try {
       const addResult = await executeCli(addCartItemsArgs(input), {
-        project: (data) => data,
-        activityProject: (data) => projectWithContract(contracts.cart, data),
-        activityContract: contracts.cart
+        project: (data) => data
       });
       let projected = projectWithContract(contracts.cart, addResult);
 
@@ -365,10 +340,7 @@ export function createDoorDashApp({
           checkoutLinkArgs({ cartUuid: projected.cart_uuid }),
           {
             project: (data) =>
-              projectWithContract(contracts.checkoutLink, data),
-            activityProject: (data) =>
-              projectWithContract(contracts.checkoutLink, data),
-            activityContract: contracts.checkoutLink
+              projectWithContract(contracts.checkoutLink, data)
           }
         );
         projected = contracts.cart.outputSchema.parse({
@@ -405,10 +377,7 @@ export function createDoorDashApp({
         applyCredits: input.applyCredits
       });
       const preview = await executeCli(previewArgs, {
-        project: (data) => data,
-        activityProject: (data) =>
-          projectWithContract(contracts.orderPreview, data),
-        activityContract: contracts.orderPreview
+        project: (data) => data
       });
 
       if (!preview?.success) {
@@ -441,10 +410,7 @@ export function createDoorDashApp({
         input.paymentConfirmation.type === "card"
       ) {
         const paymentMethods = await executeCli(listPaymentMethodsArgs(), {
-          project: (data) => data,
-          activityProject: (data) =>
-            projectWithContract(contracts.paymentMethods, data),
-          activityContract: contracts.paymentMethods
+          project: (data) => data
         });
         validateCardPayment(input, paymentMethods);
       }
@@ -465,10 +431,7 @@ export function createDoorDashApp({
       try {
         submitted = await executeCli(submitOrderArgs(input), {
           allowPurchases: true,
-          project: (data) => data,
-          activityProject: (data) =>
-            projectWithContract(contracts.orderSubmitAccepted, data),
-          activityContract: contracts.orderSubmitAccepted
+          project: (data) => data
         });
       } catch (error) {
         securityStore.finishSubmission(input.cartUuid, {
@@ -509,10 +472,7 @@ export function createDoorDashApp({
             const statusResult = await executeCli(
               orderStatusArgs({ orderUuid }),
               {
-                project: (data) => data,
-                activityProject: (data) =>
-                  projectWithContract(contracts.orderStatus, data),
-                activityContract: contracts.orderStatus
+                project: (data) => data
               }
             );
             finalStatus = statusResult;
@@ -578,8 +538,8 @@ export function createDoorDashApp({
       authInfo,
       addCartItems,
       invoke: (args, options) => invoke(args, options, authInfo),
-      invokeWithDefaultAddressLocation: (input, buildArgs) =>
-        invokeWithDefaultAddressLocation(input, buildArgs, authInfo),
+      invokeAtDefaultAddress: (input, buildArgs) =>
+        invokeAtDefaultAddress(input, buildArgs, authInfo),
       submitOrder: (input) => submitOrder(input, authInfo),
       toolResult: (value, contract) =>
         toToolResult(projectWithContract(contract, value))

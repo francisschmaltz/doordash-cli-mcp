@@ -153,10 +153,9 @@ and submissions use the account-wide default address.
 - `get_item_details`
 - `build_grocery_list`
 
-`search_restaurants` and `find_nearby_stores` accept optional `lat` and `lng`
-coordinates. Supply both to override the discovery location. If both are
-omitted, the MCP wrapper calls `list_addresses` and uses the coordinates of the
-account-wide default address. It returns an error instead of guessing when
+`search_restaurants` and `find_nearby_stores` always call `list_addresses` and
+use the coordinates of the account-wide default address. They do not accept a
+location override. The wrapper returns an error instead of guessing when
 DoorDash has no marked default or the default has no coordinates.
 
 ### Carts
@@ -239,9 +238,11 @@ ledger:
 The directory is ignored by Git. DoorDash owns carts and orders; the macOS
 Keychain owns CLI credentials.
 
-The dashboard and `activity` keep the last 100 MCP-routed CLI calls
-in memory. Results are normalized and sensitive fields are redacted before
-storage. The log resets on restart. Direct terminal calls do not appear.
+The dashboard and `activity` keep the last 100 MCP-routed CLI calls in memory.
+Commands and CLI results are stored raw and completely unredacted, including
+coordinates, addresses, URLs, payment metadata, and error details. Anyone with
+dashboard or MCP `activity` access can read them. The log resets on restart.
+Direct terminal calls do not appear.
 
 Authenticated raw activity JSON:
 

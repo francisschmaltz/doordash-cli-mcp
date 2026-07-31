@@ -1,6 +1,6 @@
 {
   "name": "doordash-cli-mcp",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "description": "Streamable HTTP MCP wrapper for DoorDash CLI",
   "type": "module",
@@ -10,7 +10,7 @@
   "scripts": {
     "start": "node src/server.js",
     "test": "node --test",
-    "check": "node --check src/server.js && node --check src/app.js && node --check src/admin-auth.js && node --check src/tools.js && node --check src/auth.js && node --check src/security-store.js && node --check src/dd-cli.js && node --check src/projections.js && node --check src/response-contract.js && node --check src/activity-log.js && node --check src/command-args.js && node --check public/app.js && node --check public/login.js"
+    "check": "node --check src/server.js && node --check src/app.js && node --check src/admin-auth.js && node --check src/tools.js && node --check src/auth.js && node --check src/security-store.js && node --check src/dd-cli.js && node --check src/response-contract.js && node --check src/activity-log.js && node --check src/command-args.js && node --check public/app.js && node --check public/login.js"
   },
   "dependencies": {
     "@modelcontextprotocol/express": "2.0.0",
