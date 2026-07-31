@@ -1908,15 +1908,13 @@ function menuProject(data) {
     );
   }
   assertObjectArray(rawItems, "menu items");
-  const normalizedItems = rawItems
-    .slice(0, 50)
-    .map((entry) =>
-      normalizeItem(entry, {
-        includeModifierGroups: false,
-        includeSubstitutions: false,
-        menuId
-      })
-    );
+  const normalizedItems = rawItems.map((entry) =>
+    normalizeItem(entry, {
+      includeModifierGroups: false,
+      includeSubstitutions: false,
+      menuId
+    })
+  );
   const items = normalizedItems.filter((item) => item.item_id && item.name);
   const returnedItemIds = new Set(items.map((item) => item.item_id));
   const storeValue =
@@ -1928,20 +1926,10 @@ function menuProject(data) {
   if (items.length !== normalizedItems.length) {
     warnings.push("Menu items without item_id or name were omitted.");
   }
-  if (rawItems.length > 50) {
-    warnings.push(
-      `${rawItems.length - 50} menu items were omitted. Call get_menu again with query set to the requested dish name.`
-    );
-  }
   const appliedQuery = stringValue(source.mcp_query);
   if (items.length === 0 && appliedQuery) {
     warnings.push(
       `No menu items matched query "${appliedQuery}". Do not repeat it unchanged; try one broader dish name or call get_menu once without query.`
-    );
-  }
-  if (categories.length > 50) {
-    warnings.push(
-      `${categories.length - 50} menu categories were omitted. Use query to request the dish name directly.`
     );
   }
   if (!menuId) {
@@ -1967,7 +1955,6 @@ function menuProject(data) {
         "categories",
         categories.length
           ? categories
-              .slice(0, 50)
               .map((category) =>
                 compactRecord([
                   ["category_id", idValue(category.id, category.category_id)],

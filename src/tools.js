@@ -637,16 +637,11 @@ export function registerDoorDashTools(server, context) {
     {
       title: "Get DoorDash Restaurant Menu",
       description:
-        "Return restaurant items for store_id. Use query for one dish. If an authoritative response supplied menu_id, pass it for safe cart handoff. On full-menu failure, only exact recent-order matches are recovered; never substitute related items. Unfiltered recovery returns at most five history items.",
+        "Return the complete restaurant menu for store_id, including its authoritative menu_id for item-detail and cart handoff. Use query to filter that menu to one dish. This makes exactly one read-only DoorDash menu call and never reads or changes cart state.",
       inputSchema: canonicalObject({
         store_id: idSchema.describe(
           "Copy store_id from search_restaurants or get_store_details."
         ),
-        menu_id: idSchema
-          .optional()
-          .describe(
-            "Authoritative menu_id from this store's reorder, cart, or another response."
-          ),
         query: z
           .string()
           .trim()

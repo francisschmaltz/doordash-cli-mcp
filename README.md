@@ -195,20 +195,12 @@ use the coordinates of the account-wide default address. They do not accept a
 location override. The wrapper returns an error instead of guessing when
 DoorDash has no marked default or the default has no coordinates.
 
-`get_menu` requires `store_id`; it also accepts an optional authoritative
-`menu_id` copied from reorder or a cart so fallback results remain safe for
-later cart calls. Its optional `query` filters a restaurant menu to the
-requested dish name. If DoorDash's full-menu lookup
-fails, the wrapper recovers recent item IDs from bounded order history and
-verifies them through current restaurant item details. A dish-name query only
-accepts the same normalized dish name, checks at most five historical matches,
-and is not an exhaustive menu search;
-without one, the fallback returns at most five and explicitly warns that it is
-not the complete menu. Recovery also requires one authoritative `menu_id` for
-the returned items. If that context is unavailable, or bounded history has no
-current exact-name match, the call fails closed. Do not use `find_items` or
-substitute a related spicy, deluxe, grilled, or other historical item; continue
-in the DoorDash app or website.
+`get_menu` requires `store_id`. It returns the authoritative `menu_id` as
+output for later item-detail and cart calls. Its optional `query` filters a
+restaurant menu to the requested dish name. The wrapper makes exactly one
+read-only `dd-cli menu --store-id` call and never reads or changes cart state.
+If DoorDash cannot return that menu, the operation fails instead of fabricating
+a partial menu from order history.
 `get_item_details` routes `i_`-prefixed IDs, plus bare historical item IDs
 paired with a restaurant `menu_id`, through the restaurant modifier endpoint.
 For an `i_` ID with no returned menu ID, the wrapper uses `store_id` as the
@@ -217,12 +209,11 @@ calls still require an authoritative menu ID. Other item IDs use grocery or
 retail details. On a large modifier tree, pass
 `option_queries` such as `["Ranch"]` to receive root choices plus compact
 matching paths instead of dumping the entire tree.
-When the full-menu endpoint succeeds, `get_menu` returns at most 50 items
-without `query` and tells the caller to retry with the dish name when more were
-omitted. A zero-match query on that successful menu says not to repeat it
-unchanged: try one broader dish name or inspect the capped menu once without a
-query. That broader-search advice does not apply when catalog recovery failed
-closed.
+When the full-menu endpoint succeeds, `get_menu` returns every valid item and
+category supplied by DoorDash, without modifier trees. A zero-match query on
+that successful menu says not to repeat it unchanged: try one broader dish
+name or inspect the full menu once without a query. That broader-search advice
+does not apply when the menu call fails upstream.
 
 ### Carts
 

@@ -310,7 +310,7 @@ test("submitted orders retain final nested status links", () => {
   assert.equal(projected.pricing.total, 30);
 });
 
-test("menu truncation is metadata rather than a fake item", () => {
+test("menu projection preserves all items without truncation", () => {
   const items = Array.from({ length: 251 }, (_, index) => ({
     item_id: index + 1,
     name: `Item ${index + 1}`,
@@ -329,23 +329,17 @@ test("menu truncation is metadata rather than a fake item", () => {
     items
   });
 
-  assert.equal(projected.items.length, 50);
-  assert.deepEqual(projected.truncation, {
-    returned: 50,
-    omitted: 201
-  });
+  assert.equal(projected.items.length, 251);
+  assert.equal(projected.truncation, undefined);
   assert.equal(
     projected.items.some((item) => "truncated" in item),
     false
   );
   assert.equal("modifier_groups" in projected.items[0], false);
-  assert.match(
-    projected.warnings.join(" "),
-    /201 menu items were omitted.*query/
-  );
+  assert.doesNotMatch(projected.warnings?.join(" ") || "", /omitted/i);
 });
 
-test("menu categories reference only returned items and are capped", () => {
+test("menu projection preserves all categories and their items", () => {
   const categories = Array.from({ length: 60 }, (_, categoryIndex) => ({
     id: `category-${categoryIndex + 1}`,
     name: `Category ${categoryIndex + 1}`,
@@ -359,8 +353,8 @@ test("menu categories reference only returned items and are capped", () => {
     categories
   });
 
-  assert.equal(projected.items.length, 50);
-  assert.ok(projected.categories.length <= 50);
+  assert.equal(projected.items.length, 360);
+  assert.equal(projected.categories.length, 60);
   const returnedIds = new Set(
     projected.items.map((item) => item.item_id)
   );
@@ -370,10 +364,8 @@ test("menu categories reference only returned items and are capped", () => {
       .every((itemId) => returnedIds.has(itemId)),
     true
   );
-  assert.match(
-    projected.warnings.join(" "),
-    /10 menu categories were omitted/
-  );
+  assert.equal(projected.truncation, undefined);
+  assert.doesNotMatch(projected.warnings?.join(" ") || "", /omitted/i);
 });
 
 test("order history omits unusable orders and caps nested items", () => {

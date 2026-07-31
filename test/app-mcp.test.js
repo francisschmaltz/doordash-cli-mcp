@@ -443,8 +443,7 @@ test("cart tools instruct callers to satisfy required options and return checkou
   );
   assert.ok(menuTool);
   assert.deepEqual(menuTool.inputSchema.required, ["store_id"]);
-  assert.equal("menu_id" in menuTool.inputSchema.properties, true);
-  assert.match(menuTool.description, /authoritative response supplied menu_id/);
+  assert.equal("menu_id" in menuTool.inputSchema.properties, false);
   assert.ok(reorderTool);
   assert.match(
     reorderTool.description,

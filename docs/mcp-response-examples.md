@@ -159,20 +159,12 @@ The wire contract has one value per fact:
 
 Use a canonical input such as
 `{"store_id":"928163","query":"Margherita Pizza"}`. The optional `query`
-filters the returned menu; it does not change DoorDash. `get_menu` takes
-`store_id`; when reorder or a cart already supplied an authoritative
-`menu_id`, pass it too so fallback output preserves that context. The response
-supplies the effective menu context for the next call. If the full-menu endpoint
-fails, a dish-name query can recover only the same normalized historical dish
-name and verify it through current item details. It checks at most five matches
-from bounded recent history and is not exhaustive; related spicy, deluxe, or
-grilled items are not substitutes.
-If no current exact-name history match exists, the call fails closed with
-`RESTAURANT_CATALOG_UNAVAILABLE`; do not broaden the history match, call
-`find_items`, or substitute another dish. Continue in the DoorDash app or
-website. Recovery also fails closed when the returned items do not share one
-authoritative `menu_id`. An unfiltered fallback returns at most five verified
-recent items and warns that the result is not a complete menu.
+filters the returned menu; it does not change DoorDash. `get_menu` takes only
+`store_id` plus that optional query. The response supplies the authoritative
+`menu_id` and effective menu context for the next call. The wrapper makes one
+read-only `dd-cli menu --store-id` call and never reads or changes cart state.
+If DoorDash cannot return that menu, the operation fails instead of fabricating
+a partial menu from order history.
 If the user already named exact options, `add_cart_items` can resolve them.
 Use `get_item_details` to inspect unknown or nested choices.
 

@@ -1274,239 +1274,6 @@ test("restaurant item details preserves a menu_id returned by the item endpoint"
   );
 });
 
-test("get_menu query rejects stale input provenance and recovers a current history item", async (t) => {
-  const store = new SecurityStore({ databasePath: ":memory:" });
-  const auth = authInfo(store);
-  const calls = [];
-  const { mcpHandler } = createTestApp({
-    securityStore: store,
-    runCli: async (args) => {
-      calls.push(args);
-      if (args[0] === "menu") {
-        return cliResult({
-          success: false,
-          menu_id: "",
-          message: "Something went wrong retrieving the menu."
-        });
-      }
-      if (args[0] === "order" && args[1] === "history") {
-        const order = sourceOrder();
-        order.store.name = "Chick-fil-A";
-        order.menu_id = "25103748";
-        order.store.menu_id = "25103748";
-        order.items[0].item_id = 111111;
-        order.items[0].menu_id = "25103748";
-        order.items[0].name = "Chick-fil-A® Chicken Sandwich Meal";
-        return cliResult({ orders: [order] });
-      }
-      if (args[0] === "restaurant-item-details") {
-        const details = ranchItemDetails();
-        details.item.item_id = "i_111111";
-        details.item.name = "Chick-fil-A® Chicken Sandwich Meal";
-        return cliResult(details);
-      }
-      throw new Error(`Unexpected CLI call: ${args.join(" ")}`);
-    }
-  });
-  t.after(async () => {
-    await mcpHandler.close();
-    store.close();
-  });
-
-  const response = await mcpRequest(mcpHandler, auth, {
-    name: "get_menu",
-    arguments: {
-      store_id: "store-chicken",
-      menu_id: "25021439",
-      query: "Chicken Sandwich Meal"
-    }
-  });
-
-  assert.equal(response.result.isError, undefined);
-  assert.equal(response.result.structuredContent.menu_id, "25103748");
-  assert.equal(response.result.structuredContent.items.length, 1);
-  assert.equal(
-    response.result.structuredContent.items[0].item_id,
-    "i_111111"
-  );
-  assert.equal(
-    response.result.structuredContent.items[0].name,
-    "Chick-fil-A® Chicken Sandwich Meal"
-  );
-  assert.match(
-    response.result.structuredContent.warnings.join(" "),
-    /full-menu lookup failed.*order history/i
-  );
-  assert.deepEqual(calls.map((args) => args.slice(0, 2)), [
-    ["menu", "--store-id"],
-    ["order", "history"],
-    ["restaurant-item-details", "--store-id"]
-  ]);
-  assert.deepEqual(calls[2], [
-    "restaurant-item-details",
-    "--store-id",
-    "store-chicken",
-    "--menu-id",
-    "25103748",
-    "--item-id",
-    "111111"
-  ]);
-
-  calls.length = 0;
-  const unfiltered = await mcpRequest(
-    mcpHandler,
-    auth,
-    {
-      name: "get_menu",
-      arguments: { store_id: "store-chicken" }
-    },
-    2
-  );
-  assert.equal(unfiltered.result.isError, undefined);
-  assert.equal(unfiltered.result.structuredContent.items.length, 1);
-  assert.match(
-    unfiltered.result.structuredContent.warnings.join(" "),
-    /not the store's complete menu/i
-  );
-  assert.deepEqual(calls.map((args) => args.slice(0, 2)), [
-    ["menu", "--store-id"],
-    ["order", "history"],
-    ["restaurant-item-details", "--store-id"]
-  ]);
-});
-
-test("get_menu recovery inspects exact history matches after order 25", async (t) => {
-  const store = new SecurityStore({ databasePath: ":memory:" });
-  const auth = authInfo(store);
-  const calls = [];
-  const { mcpHandler } = createTestApp({
-    securityStore: store,
-    runCli: async (args) => {
-      calls.push(args);
-      if (args[0] === "menu") {
-        return cliResult({
-          success: false,
-          menu_id: "",
-          message: "Something went wrong retrieving the menu."
-        });
-      }
-      if (args[0] === "order" && args[1] === "history") {
-        const fillerOrders = Array.from({ length: 25 }, (_, index) => {
-          const order = sourceOrder();
-          order.order_uuid = `order-filler-${index + 1}`;
-          order.menu_id = "25103748";
-          order.store.menu_id = "25103748";
-          order.items[0].item_id = 100000 + index;
-          order.items[0].menu_id = "25103748";
-          order.items[0].name = `Different Meal ${index + 1}`;
-          return order;
-        });
-        const targetOrder = sourceOrder();
-        targetOrder.order_uuid = "order-target";
-        targetOrder.menu_id = "25103748";
-        targetOrder.store.menu_id = "25103748";
-        targetOrder.items[0].item_id = 999999;
-        targetOrder.items[0].menu_id = "25103748";
-        targetOrder.items[0].name = "Chicken Sandwich Meal";
-        return cliResult({ orders: [...fillerOrders, targetOrder] });
-      }
-      if (args[0] === "restaurant-item-details") {
-        const details = ranchItemDetails();
-        details.menu_id = "25103748";
-        details.item.item_id = "i_999999";
-        details.item.name = "Chicken Sandwich Meal";
-        return cliResult(details);
-      }
-      throw new Error(`Unexpected CLI call: ${args.join(" ")}`);
-    }
-  });
-  t.after(async () => {
-    await mcpHandler.close();
-    store.close();
-  });
-
-  const response = await mcpRequest(mcpHandler, auth, {
-    name: "get_menu",
-    arguments: {
-      store_id: "store-chicken",
-      query: "Chicken Sandwich Meal"
-    }
-  });
-
-  assert.equal(response.result.isError, undefined);
-  assert.equal(response.result.structuredContent.menu_id, "25103748");
-  assert.deepEqual(
-    response.result.structuredContent.items.map((item) => item.item_id),
-    ["i_999999"]
-  );
-  const historyCall = calls.find(
-    (args) => args[0] === "order" && args[1] === "history"
-  );
-  assert.ok(historyCall);
-  assert.equal(historyCall[historyCall.indexOf("--max") + 1], "100");
-  assert.deepEqual(calls.at(-1), [
-    "restaurant-item-details",
-    "--store-id",
-    "store-chicken",
-    "--menu-id",
-    "25103748",
-    "--item-id",
-    "999999"
-  ]);
-});
-
-test("get_menu never substitutes a qualified historical item for an unseen dish", async (t) => {
-  const store = new SecurityStore({ databasePath: ":memory:" });
-  const auth = authInfo(store);
-  const calls = [];
-  const { mcpHandler } = createTestApp({
-    securityStore: store,
-    runCli: async (args) => {
-      calls.push(args);
-      if (args[0] === "menu") {
-        return cliResult({
-          success: false,
-          menu_id: "",
-          error_reason: "RESTAURANT_CATALOG_UNAVAILABLE",
-          message: "Full menu unavailable."
-        });
-      }
-      if (args[0] === "order" && args[1] === "history") {
-        const spicy = sourceOrder();
-        spicy.items[0].name = "Spicy Chicken Sandwich Deluxe Meal";
-        const grilled = sourceOrder();
-        grilled.order_uuid = "order-grilled";
-        grilled.items[0].item_id = 222222;
-        grilled.items[0].name = "Grilled Chicken Sandwich";
-        return cliResult({ orders: [spicy, grilled] });
-      }
-      throw new Error(`Unexpected CLI call: ${args.join(" ")}`);
-    }
-  });
-  t.after(async () => {
-    await mcpHandler.close();
-    store.close();
-  });
-
-  const response = await mcpRequest(mcpHandler, auth, {
-    name: "get_menu",
-    arguments: {
-      store_id: "store-chicken",
-      query: "Chicken Sandwich Meal"
-    }
-  });
-
-  assert.equal(response.result.isError, true);
-  assert.match(
-    response.result.structuredContent.error.message,
-    /cannot be safely discovered.*do not use find_items/i
-  );
-  assert.equal(
-    calls.some((args) => args[0] === "restaurant-item-details"),
-    false
-  );
-});
-
 test("get_menu rejects store_id published as menu_id", async (t) => {
   const store = new SecurityStore({ databasePath: ":memory:" });
   const auth = authInfo(store);
@@ -1547,38 +1314,15 @@ test("get_menu rejects store_id published as menu_id", async (t) => {
   );
 });
 
-test("get_menu fallback treats store_id only as lookup context", async (t) => {
+test("get_menu rejects menu_id before the CLI", async (t) => {
   const store = new SecurityStore({ databasePath: ":memory:" });
   const auth = authInfo(store);
-  const calls = [];
+  let cliCalls = 0;
   const { mcpHandler } = createTestApp({
     securityStore: store,
-    runCli: async (args) => {
-      calls.push(args);
-      if (args[0] === "menu") {
-        return cliResult({
-          success: false,
-          menu_id: "",
-          message: "Full menu unavailable."
-        });
-      }
-      if (args[0] === "order" && args[1] === "history") {
-        const order = sourceOrder();
-        delete order.menu_id;
-        delete order.store.menu_id;
-        delete order.items[0].menu_id;
-        return cliResult({ orders: [order] });
-      }
-      if (args[0] === "cart" && args[1] === "list") {
-        return cliResult({ carts: [] });
-      }
-      if (args[0] === "restaurant-item-details") {
-        const details = ranchItemDetails();
-        details.menu_id = "menu-chicken";
-        details.item.item_id = "i_9459662774";
-        return cliResult(details);
-      }
-      throw new Error(`Unexpected CLI call: ${args.join(" ")}`);
+    runCli: async () => {
+      cliCalls += 1;
+      throw new Error("The CLI must not run for invalid input.");
     }
   });
   t.after(async () => {
@@ -1590,133 +1334,13 @@ test("get_menu fallback treats store_id only as lookup context", async (t) => {
     name: "get_menu",
     arguments: {
       store_id: "store-chicken",
-      menu_id: "store-chicken",
-      query: "Deluxe Chicken Meal"
-    }
-  });
-
-  assert.equal(response.result.isError, undefined);
-  assert.equal(response.result.structuredContent.menu_id, "menu-chicken");
-  assert.notEqual(
-    response.result.structuredContent.menu_id,
-    response.result.structuredContent.store.store_id
-  );
-  const detailsCall = calls.find(
-    (args) => args[0] === "restaurant-item-details"
-  );
-  assert.equal(
-    detailsCall[detailsCall.indexOf("--menu-id") + 1],
-    "store-chicken"
-  );
-});
-
-test("get_menu fallback keeps the newest historical item identity", async (t) => {
-  const store = new SecurityStore({ databasePath: ":memory:" });
-  const auth = authInfo(store);
-  const calls = [];
-  const { mcpHandler } = createTestApp({
-    securityStore: store,
-    runCli: async (args) => {
-      calls.push(args);
-      if (args[0] === "menu") {
-        return cliResult({
-          success: false,
-          menu_id: "",
-          message: "Something went wrong retrieving the menu."
-        });
-      }
-      if (args[0] === "order" && args[1] === "history") {
-        const newest = sourceOrder();
-        const older = sourceOrder();
-        older.order_uuid = "order-older";
-        older.items[0].name = "Retired Deluxe Chicken Meal";
-        return cliResult({
-          orders: [
-            { ...sourceOrder(), order_uuid: "order-empty", items: [] },
-            newest,
-            older
-          ]
-        });
-      }
-      if (args[0] === "restaurant-item-details") {
-        const details = ranchItemDetails();
-        details.item.item_id = "i_9459662774";
-        return cliResult(details);
-      }
-      throw new Error(`Unexpected CLI call: ${args.join(" ")}`);
-    }
-  });
-  t.after(async () => {
-    await mcpHandler.close();
-    store.close();
-  });
-
-  const response = await mcpRequest(mcpHandler, auth, {
-    name: "get_menu",
-    arguments: {
-      store_id: "store-chicken",
-      query: "Deluxe Chicken Meal"
-    }
-  });
-
-  assert.equal(response.result.isError, undefined);
-  assert.deepEqual(
-    response.result.structuredContent.items.map((item) => item.name),
-    ["Deluxe Chicken Meal"]
-  );
-  assert.equal(
-    calls.filter((args) => args[0] === "restaurant-item-details").length,
-    1
-  );
-});
-
-test("get_menu fallback rejects mismatched current item details", async (t) => {
-  const store = new SecurityStore({ databasePath: ":memory:" });
-  const auth = authInfo(store);
-  const { mcpHandler } = createTestApp({
-    securityStore: store,
-    runCli: async (args) => {
-      if (args[0] === "menu") {
-        return cliResult({
-          success: false,
-          menu_id: "",
-          error_reason: "TEMPORARY_UPSTREAM_FAILURE",
-          message: "Full menu unavailable."
-        });
-      }
-      if (args[0] === "order" && args[1] === "history") {
-        return cliResult({ orders: [sourceOrder()] });
-      }
-      if (args[0] === "restaurant-item-details") {
-        const details = ranchItemDetails();
-        details.item.item_id = "i_different_item";
-        return cliResult(details);
-      }
-      throw new Error(`Unexpected CLI call: ${args.join(" ")}`);
-    }
-  });
-  t.after(async () => {
-    await mcpHandler.close();
-    store.close();
-  });
-
-  const response = await mcpRequest(mcpHandler, auth, {
-    name: "get_menu",
-    arguments: {
-      store_id: "store-chicken",
+      menu_id: "menu-chicken",
       query: "Deluxe Chicken Meal"
     }
   });
 
   assert.equal(response.result.isError, true);
-  assert.equal(
-    response.result.structuredContent.error.code,
-    "TEMPORARY_UPSTREAM_FAILURE"
-  );
-  assert.equal(
-    response.result.structuredContent.error.message,
-    "Full menu unavailable."
-  );
+  assert.equal(cliCalls, 0);
 });
 
 test("get_menu rejects a whitespace-only query before the CLI", async (t) => {
@@ -2430,7 +2054,7 @@ test("restaurant fallback is not repeated after a name mismatch", async (t) => {
   ]);
 });
 
-test("get_menu preserves success:false when history recovery is unavailable", async (t) => {
+test("get_menu operational failure stops after one menu call", async (t) => {
   const store = new SecurityStore({ databasePath: ":memory:" });
   const auth = authInfo(store);
   const calls = [];
@@ -2464,7 +2088,9 @@ test("get_menu preserves success:false when history recovery is unavailable", as
   assert.equal(error.code, "TEMPORARY_UPSTREAM_FAILURE");
   assert.equal(error.message, "Please try again.");
   assert.notEqual(error.code, "UPSTREAM_SCHEMA_ERROR");
-  assert.deepEqual(calls.map((args) => args[0]), ["menu", "order"]);
+  assert.deepEqual(calls, [
+    ["menu", "--store-id", "store-chicken"]
+  ]);
 });
 
 test("preview preserves success:false before quote validation", async (t) => {
