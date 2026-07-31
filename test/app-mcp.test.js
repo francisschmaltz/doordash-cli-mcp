@@ -349,6 +349,298 @@ test("order status accepts order_uuid copied from list_orders", async () => {
   store.close();
 });
 
+test("every emitted identifier is accepted by its consuming tool", async () => {
+  const store = new SecurityStore({ databasePath: ":memory:" });
+  const token = store.createToken({
+    name: "Purchase",
+    allowPurchases: true
+  });
+  const { mcpHandler } = createTestApp({
+    securityStore: store,
+    runCli: async () => {
+      throw new Error("CLI should not run during tools/list.");
+    }
+  });
+
+  const response = await mcpRequest(
+    mcpHandler,
+    authInfo(store, token.token),
+    "tools/list",
+    {}
+  );
+  const tools = new Map(
+    response.body.result.tools.map((tool) => [tool.name, tool])
+  );
+  const expectedFields = {
+    set_default_address: ["address_id"],
+    build_grocery_list: ["store_id"],
+    find_items: ["store_id"],
+    get_item_details: ["store_id", "item_id", "menu_id"],
+    get_menu: ["store_id"],
+    get_restaurant_item_details: ["store_id", "menu_id", "item_id"],
+    get_store_details: ["store_id"],
+    add_cart_items: ["store_id", "menu_id", "cart_uuid"],
+    delete_cart: ["cart_uuid"],
+    list_carts: ["store_id"],
+    remove_cart_item: ["cart_uuid", "cart_item_id"],
+    show_cart: ["cart_uuid"],
+    create_checkout_link: ["cart_uuid"],
+    preview_order: [
+      "cart_uuid",
+      "scheduled_time",
+      "selected_budget_id",
+      "budget_id"
+    ],
+    get_receipt: ["order_uuid"],
+    reorder: ["order_uuid"],
+    order_status: ["order_uuid"],
+    list_promos: ["store_id"],
+    apply_promo: [
+      "cart_uuid",
+      "promo_code",
+      "campaign_id",
+      "ad_group_id",
+      "ad_id"
+    ],
+    remove_promo: [
+      "cart_uuid",
+      "promo_code",
+      "campaign_id",
+      "ad_group_id",
+      "ad_id"
+    ],
+    order_submit: [
+      "cart_uuid",
+      "scheduled_time",
+      "team_id",
+      "budget_id",
+      "team_account_id",
+      "expense_code",
+      "expense_notes"
+    ]
+  };
+
+  for (const [toolName, fields] of Object.entries(expectedFields)) {
+    const tool = tools.get(toolName);
+    assert.ok(tool, `${toolName} should be registered`);
+    for (const field of fields) {
+      assert.ok(
+        tool.inputSchema.properties[field],
+        `${toolName} should accept ${field}`
+      );
+    }
+  }
+
+  const addSchema = JSON.stringify(tools.get("add_cart_items").inputSchema);
+  for (const field of [
+    "item_id",
+    "name",
+    "requested_options",
+    "nested_options",
+    "option_id"
+  ]) {
+    assert.match(addSchema, new RegExp(`"${field}"`));
+  }
+  assert.match(
+    JSON.stringify(tools.get("order_submit").inputSchema),
+    /"budget_name"/
+  );
+  assert.match(
+    JSON.stringify(tools.get("order_submit").inputSchema),
+    /"name"/
+  );
+
+  await mcpHandler.close();
+  store.close();
+});
+
+test("snake-case IDs route through address, item, cart, and promo tools", async () => {
+  const store = new SecurityStore({ databasePath: ":memory:" });
+  const token = store.createToken({
+    name: "Open WebUI",
+    allowPurchases: false
+  });
+  const calls = [];
+  const { mcpHandler } = createTestApp({
+    securityStore: store,
+    runCli: async (args) => {
+      calls.push(args);
+      if (args[0] === "address") {
+        return cliResult({
+          success: true,
+          address_id: "address-1"
+        });
+      }
+      if (args[0] === "restaurant-item-details") {
+        return cliResult({
+          item: {
+            item_id: "i_item-1",
+            name: "Item"
+          }
+        });
+      }
+      if (args[0] === "order" && args[1] === "preview") {
+        return cliResult({
+          success: true,
+          cart_uuid: "cart-1",
+          quote: {
+            store_order_cart: {
+              orders: []
+            }
+          }
+        });
+      }
+      return cliResult({
+        success: true,
+        message: "Updated."
+      });
+    }
+  });
+  const auth = authInfo(store, token.token);
+
+  const requests = [
+    {
+      name: "set_default_address",
+      arguments: {
+        address_id: "address-1",
+        confirmation: "SET DEFAULT ADDRESS"
+      }
+    },
+    {
+      name: "get_restaurant_item_details",
+      arguments: {
+        store_id: "store-1",
+        menu_id: "menu-1",
+        item_id: "i_item-1"
+      }
+    },
+    {
+      name: "remove_cart_item",
+      arguments: {
+        cart_uuid: "cart-1",
+        cart_item_id: "line-1"
+      }
+    },
+    {
+      name: "apply_promo",
+      arguments: {
+        cart_uuid: "cart-1",
+        promo_code: "SAVE",
+        campaign_id: "campaign-1",
+        ad_group_id: "group-1",
+        ad_id: "ad-1"
+      }
+    },
+    {
+      name: "preview_order",
+      arguments: {
+        cart_uuid: "cart-1",
+        budget_id: "budget-1"
+      }
+    }
+  ];
+
+  for (const [index, request] of requests.entries()) {
+    const response = await mcpRequest(
+      mcpHandler,
+      auth,
+      "tools/call",
+      request,
+      index + 1
+    );
+    assert.equal(
+      response.body.result.isError,
+      undefined,
+      response.body.result.content[0].text
+    );
+  }
+
+  assert.deepEqual(calls, [
+    ["address", "set", "--address-id", "address-1", "--yes"],
+    [
+      "restaurant-item-details",
+      "--store-id",
+      "store-1",
+      "--menu-id",
+      "menu-1",
+      "--item-id",
+      "item-1"
+    ],
+    [
+      "cart",
+      "remove-item",
+      "--cart-uuid",
+      "cart-1",
+      "--cart-item-id",
+      "line-1"
+    ],
+    [
+      "promo",
+      "apply",
+      "--cart-uuid",
+      "cart-1",
+      "--promo-code",
+      "SAVE",
+      "--campaign-id",
+      "campaign-1",
+      "--ad-group-id",
+      "group-1",
+      "--ad-id",
+      "ad-1"
+    ],
+    [
+      "order",
+      "preview",
+      "--cart-uuid",
+      "cart-1",
+      "--selected-budget-id",
+      "budget-1"
+    ]
+  ]);
+
+  await mcpHandler.close();
+  store.close();
+});
+
+test("conflicting snake-case and camel-case IDs fail before the CLI", async () => {
+  const store = new SecurityStore({ databasePath: ":memory:" });
+  const token = store.createToken({
+    name: "Open WebUI",
+    allowPurchases: false
+  });
+  let cliCalls = 0;
+  const { mcpHandler } = createTestApp({
+    securityStore: store,
+    runCli: async () => {
+      cliCalls += 1;
+      return cliResult({});
+    }
+  });
+
+  const response = await mcpRequest(
+    mcpHandler,
+    authInfo(store, token.token),
+    "tools/call",
+    {
+      name: "show_cart",
+      arguments: {
+        cart_uuid: "cart-1",
+        cartUuid: "cart-2"
+      }
+    }
+  );
+
+  assert.equal(response.body.result.isError, true);
+  assert.match(
+    response.body.result.content[0].text,
+    /cart_uuid and cartUuid must match/
+  );
+  assert.equal(cliCalls, 0);
+
+  await mcpHandler.close();
+  store.close();
+});
+
 test("add cart returns a checkout URL after adding fully selected items", async () => {
   const store = new SecurityStore({ databasePath: ":memory:" });
   const token = store.createToken({
@@ -583,18 +875,18 @@ test("add cart preflights variants and sends one complete DoorDash batch", async
     {
       name: "add_cart_items",
       arguments: {
-        storeId: "707534",
-        menuId: "34596353",
+        store_id: "707534",
+        menu_id: "34596353",
         items: [
           {
-            itemId: "i_12901175286",
-            itemName: "Spicy TanTan",
-            requestedOptions: ["Utensils"]
+            item_id: "i_12901175286",
+            name: "Spicy TanTan",
+            requested_options: ["Utensils"]
           },
           {
-            itemId: "i_12901175286",
-            itemName: "Spicy TanTan with Sweet Corn",
-            requestedOptions: ["Utensils"]
+            item_id: "i_12901175286",
+            name: "Spicy TanTan with Sweet Corn",
+            requested_options: ["Utensils"]
           }
         ]
       }
@@ -736,6 +1028,26 @@ test("add cart reports every modifier before writing when a choice is missing", 
   assert.match(
     response.body.result.structuredContent.item_errors[0].message,
     /Imaginary Sauce.*does not match/
+  );
+  assert.match(
+    response.body.result.content[0].text,
+    /No cart changes were made/
+  );
+  assert.match(
+    response.body.result.content[0].text,
+    /retrying add_cart_items once; never repeat the unchanged input/
+  );
+  assert.match(
+    response.body.result.content[0].text,
+    /Utensils: Utensils : Yes \[o_yes\], Utensils : No \[o_no\]/
+  );
+  assert.match(
+    response.body.result.content[0].text,
+    /Topping: Sweet Corn \[o_corn\]/
+  );
+  assert.deepEqual(
+    JSON.parse(response.body.result.content[1].text),
+    response.body.result.structuredContent
   );
 
   await mcpHandler.close();
@@ -1484,7 +1796,11 @@ test("malformed upstream data is a typed MCP error, not an empty result", async 
     response.body.result.structuredContent.error.code,
     "UPSTREAM_SCHEMA_ERROR"
   );
-  assert.equal(response.body.result.content.length, 1);
+  assert.equal(response.body.result.content.length, 2);
+  assert.deepEqual(
+    JSON.parse(response.body.result.content[1].text),
+    response.body.result.structuredContent
+  );
   assert.equal("data" in response.body.result.structuredContent, false);
 
   await mcpHandler.close();
@@ -1578,7 +1894,7 @@ test("submit revalidates quote and card, records the attempt, and polls status",
     {
       name: "order_submit",
       arguments: {
-        cartUuid: "cart-1",
+        cart_uuid: "cart-1",
         expectedTotalBeforeTipCents: 2500,
         expectedDeliveryAddress:
           "21 Bay Forest Dr, Oakland, CA 94611",

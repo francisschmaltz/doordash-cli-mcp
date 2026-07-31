@@ -43,7 +43,7 @@ const PUBLIC_DIR = path.resolve(SOURCE_DIR, "..", "public");
 const LOGIN_PATH = path.join(PUBLIC_DIR, "login.html");
 const LOGIN_SCRIPT_PATH = path.join(PUBLIC_DIR, "login.js");
 const STYLES_PATH = path.join(PUBLIC_DIR, "styles.css");
-const SERVER_VERSION = "0.4.3";
+const SERVER_VERSION = "0.4.4";
 const TERMINAL_ORDER_STATUSES = new Set([
   "successful",
   "action_required",
@@ -331,13 +331,15 @@ function validateWorkPayment(input, preview) {
   const hasTeamId = Boolean(input.teamId);
   const hasBudgetId = Boolean(input.budgetId);
   if (hasTeamId !== hasBudgetId) {
-    throw new DoorDashCliError("teamId and budgetId must be provided together.");
+    throw new DoorDashCliError(
+      "team_id and budget_id must be provided together."
+    );
   }
 
   if (!hasTeamId) {
     if (input.paymentConfirmation.type === "work_budget") {
       throw new DoorDashCliError(
-        "Work-budget confirmation requires teamId and budgetId."
+        "Work-budget confirmation requires team_id and budget_id."
       );
     }
     return;
@@ -633,7 +635,7 @@ export function createDoorDashApp({
           },
           message:
             `This line has the same item ID and selected options as "${earlier.originalName}". ` +
-            "Changing itemName does not customize a DoorDash item. Add the distinguishing option through requestedOptions or nestedOptions. No cart changes were made.",
+            "Changing name does not customize a DoorDash item. Add the distinguishing option through requested_options or nested_options. No cart changes were made.",
           modifier_groups:
             detailsByItemId.get(item.itemId.replace(/^i_/, ""))
               ?.modifier_groups
@@ -683,7 +685,7 @@ export function createDoorDashApp({
             };
           } else {
             throw new DoorDashCliError(
-              `An active DoorDash cart already exists at this store (${existingCart.cart_uuid}). No items were added. Call show_cart with that cartUuid first. If it already matches the request, call create_checkout_link; otherwise ask whether to extend it using that cartUuid or replace it with delete_cart.`,
+              `An active DoorDash cart already exists at this store (${existingCart.cart_uuid}). No items were added. Call show_cart with that cart_uuid first. If it already matches the request, call create_checkout_link; otherwise ask whether to extend it using that cart_uuid or replace it with delete_cart.`,
               {
                 code: "ACTIVE_CART_EXISTS",
                 cartUuid: existingCart.cart_uuid

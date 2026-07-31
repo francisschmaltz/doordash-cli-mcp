@@ -3,11 +3,11 @@
 Typed results use a compact, versioned object:
 
 - `content[0].text` is readable prose.
-- On success, `content[1].text` is minified JSON exactly equal to
+- `content[1].text` is minified JSON exactly equal to
   `JSON.stringify(structuredContent)`.
 - `structuredContent` is the machine contract.
-- On error, `isError` is `true`, `content` contains only the readable error,
-  and `structuredContent.error` contains the typed error.
+- On error, `isError` is `true` and `structuredContent.error` contains the
+  typed error.
 
 Every structured result starts with:
 
@@ -428,9 +428,9 @@ DoorDash.
 
 ## Error
 
-Malformed upstream containers are errors, not empty successes. Errors have no
-JSON compatibility copy because the readable error plus structured error is
-already unambiguous.
+Malformed upstream containers are errors, not empty successes. Errors retain
+the JSON compatibility copy so clients that ignore `structuredContent` still
+receive recovery details.
 
 ```json
 {
@@ -438,6 +438,10 @@ already unambiguous.
     {
       "type": "text",
       "text": "UPSTREAM_SCHEMA_ERROR: DoorDash menu response did not contain an items array."
+    },
+    {
+      "type": "text",
+      "text": "{\"schema\":\"doordash-cli\",\"version\":1,\"kind\":\"menu\",\"error\":{\"code\":\"UPSTREAM_SCHEMA_ERROR\",\"message\":\"DoorDash menu response did not contain an items array.\",\"retryable\":false}}"
     }
   ],
   "structuredContent": {

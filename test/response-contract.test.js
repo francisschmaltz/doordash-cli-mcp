@@ -127,7 +127,7 @@ test("every response contract validates its compact success response", () => {
   }
 });
 
-test("errors are readable, direct, and are not duplicated as JSON text", () => {
+test("errors are readable and include JSON for clients that ignore structuredContent", () => {
   for (const contract of new Set(Object.values(contracts))) {
     const failure = errorEnvelope(contract, new Error("Upstream exploded."));
     assert.equal(failure.schema, RESPONSE_SCHEMA);
@@ -139,9 +139,11 @@ test("errors are readable, direct, and are not duplicated as JSON text", () => {
     const result = toToolResult(failure);
     assert.equal(result.isError, true);
     assert.deepEqual(result.structuredContent, failure);
-    assert.equal(result.content.length, 1);
+    assert.equal(result.content.length, 2);
     assert.equal(result.content[0].type, "text");
     assert.match(result.content[0].text, /Upstream exploded\./);
+    assert.equal(result.content[1].type, "text");
+    assert.deepEqual(JSON.parse(result.content[1].text), failure);
   }
 });
 
@@ -179,7 +181,9 @@ test("documented JSON responses parse and match their advertised contracts", asy
 
     if (structured.error) {
       assert.equal(example.isError, true);
-      assert.equal(example.content.length, 1);
+      assert.equal(example.content.length, 2);
+      assert.equal(example.content[1]?.type, "text");
+      assert.deepEqual(JSON.parse(example.content[1].text), structured);
       assert.equal(typeof structured.error.code, "string");
       assert.equal(typeof structured.error.message, "string");
       continue;

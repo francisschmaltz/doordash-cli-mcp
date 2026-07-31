@@ -40,6 +40,134 @@ const verticalSchema = z.enum([
   "nv"
 ]);
 
+const inputAliasPairs = [
+  ["address_id", "addressId"],
+  ["store_id", "storeId"],
+  ["menu_id", "menuId"],
+  ["item_id", "itemId"],
+  ["cart_uuid", "cartUuid"],
+  ["cart_item_id", "cartItemId"],
+  ["order_uuid", "orderUuid"],
+  ["promo_code", "promoCode"],
+  ["campaign_id", "campaignId"],
+  ["ad_group_id", "adGroupId"],
+  ["ad_id", "adId"],
+  ["scheduled_time", "scheduledTime"],
+  ["selected_budget_id", "selectedBudgetId"],
+  ["team_id", "teamId"],
+  ["budget_id", "budgetId"],
+  ["team_account_id", "teamAccountId"],
+  ["expense_code", "expenseCode"],
+  ["expense_notes", "expenseNotes"]
+];
+
+function aliasFields(
+  snakeName,
+  camelName,
+  schema = idSchema,
+  source = "a previous tool response"
+) {
+  return {
+    [snakeName]: schema
+      .optional()
+      .describe(`Preferred: copy ${snakeName} exactly from ${source}.`),
+    [camelName]: schema
+      .optional()
+      .describe(`Camel-case alias for ${snakeName}.`)
+  };
+}
+
+function aliasedObject(shape, {
+  required = [],
+  optional = []
+} = {}) {
+  const references = [...required, ...optional];
+  return z.object(shape).superRefine((value, context) => {
+    for (const [snakeName, camelName, label = snakeName] of references) {
+      const snakeValue = value[snakeName];
+      const camelValue = value[camelName];
+      if (
+        snakeValue !== undefined &&
+        camelValue !== undefined &&
+        snakeValue !== camelValue
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: [snakeName],
+          message: `${snakeName} and ${camelName} must match when both are provided.`
+        });
+      }
+      if (
+        required.some(
+          ([requiredSnake, requiredCamel]) =>
+            requiredSnake === snakeName && requiredCamel === camelName
+        ) &&
+        snakeValue === undefined &&
+        camelValue === undefined
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: [snakeName],
+          message: `Provide ${snakeName} (preferred) or ${camelName} for ${label}.`
+        });
+      }
+    }
+  });
+}
+
+function normalizeAliases(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return value;
+  }
+  const normalized = { ...value };
+  for (const [snakeName, camelName] of inputAliasPairs) {
+    if (
+      normalized[camelName] === undefined &&
+      normalized[snakeName] !== undefined
+    ) {
+      normalized[camelName] = normalized[snakeName];
+    }
+  }
+  return normalized;
+}
+
+function normalizeToolInput(input) {
+  const normalized = normalizeAliases(input);
+  if (!normalized || typeof normalized !== "object") {
+    return normalized;
+  }
+  if (Array.isArray(normalized.items)) {
+    normalized.items = normalized.items.map((value) => {
+      const item = normalizeAliases(value);
+      item.itemName =
+        item.name ?? item.item_name ?? item.itemName;
+      item.requestedOptions =
+        item.requested_options ?? item.requestedOptions;
+      item.nestedOptions =
+        item.nested_options ?? item.nestedOptions;
+      return item;
+    });
+  }
+  if (
+    normalized.paymentConfirmation &&
+    typeof normalized.paymentConfirmation === "object"
+  ) {
+    normalized.paymentConfirmation = {
+      ...normalized.paymentConfirmation,
+      budgetName:
+        normalized.paymentConfirmation.budgetName ??
+        normalized.paymentConfirmation.budget_name ??
+        normalized.paymentConfirmation.name
+    };
+  }
+  normalized.selectedBudgetId =
+    normalized.selectedBudgetId ??
+    normalized.selected_budget_id ??
+    normalized.budget_id ??
+    normalized.budgetId;
+  return normalized;
+}
+
 function selectedOptionId(option) {
   return option.option_id || option.optionId || option.id;
 }
@@ -77,25 +205,50 @@ const selectedCartOptionSchema = z.lazy(() =>
     })
     .refine((option) => Boolean(selectedOptionId(option)), {
       message:
-        "Each nestedOptions entry requires option_id (preferred), optionId, or id."
+        "Each nested_options entry requires option_id (preferred), optionId, or id."
     })
     .refine((option) => !selectedOptionId(option)?.startsWith("e_"), {
       message:
-        "nestedOptions entries must be selected option IDs, not modifier-group IDs such as e_...."
+        "nested_options entries must be selected option IDs, not modifier-group IDs such as e_...."
     })
 );
 
-const cartItemSchema = z.object({
-  itemId: idSchema,
+const cartItemSchema = aliasedObject({
+  ...aliasFields(
+    "item_id",
+    "itemId",
+    idSchema,
+    "get_menu, get_item_details, find_items, or list_orders"
+  ),
   itemName: z
     .string()
     .min(1)
     .max(500)
+    .optional()
     .describe(
-      "The menu item's real name, not a customization label. Put choices such as Sweet Corn in requestedOptions or nestedOptions."
+      "Camel-case item-name alias. Prefer name from the menu response."
     ),
+  item_name: z
+    .string()
+    .min(1)
+    .max(500)
+    .optional()
+    .describe("Snake-case alias for name."),
+  name: z
+    .string()
+    .min(1)
+    .max(500)
+    .optional()
+    .describe("Preferred when copying an item from a tool response."),
   quantity: z.number().positive().max(10_000).default(1),
   requestedOptions: z
+    .array(z.string().min(1).max(300))
+    .max(50)
+    .optional()
+    .describe(
+      "Camel-case alias for requested_options."
+    ),
+  requested_options: z
     .array(z.string().min(1).max(300))
     .max(50)
     .optional()
@@ -107,42 +260,144 @@ const cartItemSchema = z.object({
     .max(100)
     .optional()
     .describe(
+      "Camel-case alias for nested_options."
+    ),
+  nested_options: z
+    .array(selectedCartOptionSchema)
+    .max(100)
+    .optional()
+    .describe(
       "Selected options only. Copy option_id and name from each chosen option. Include enough entries to satisfy every modifier group whose min_selections is greater than zero. Keep ordinary selections in this top-level list; never include group_id or extra_id nodes."
     )
+}, {
+  required: [["item_id", "itemId", "item ID"]]
+}).superRefine((item, context) => {
+  if (!item.itemName && !item.item_name && !item.name) {
+    context.addIssue({
+      code: "custom",
+      path: ["name"],
+      message: "Provide name (preferred), item_name, or itemName."
+    });
+  }
+  const names = [item.name, item.item_name, item.itemName].filter(
+    (entry) => entry !== undefined
+  );
+  if (new Set(names).size > 1) {
+    context.addIssue({
+      code: "custom",
+      path: ["name"],
+      message:
+        "name, item_name, and itemName must match when more than one is provided."
+    });
+  }
+  for (const [snakeName, camelName] of [
+    ["requested_options", "requestedOptions"],
+    ["nested_options", "nestedOptions"]
+  ]) {
+    if (
+      item[snakeName] !== undefined &&
+      item[camelName] !== undefined &&
+      JSON.stringify(item[snakeName]) !== JSON.stringify(item[camelName])
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: [snakeName],
+        message: `${snakeName} and ${camelName} must match when both are provided.`
+      });
+    }
+  }
 });
 
 const previewOptionsSchema = {
-  scheduledTime: z.string().datetime({ offset: true }).optional(),
+  ...aliasFields(
+    "scheduled_time",
+    "scheduledTime",
+    z.string().datetime({ offset: true }),
+    "preview_order or an earlier scheduling choice"
+  ),
   fulfillment: fulfillmentSchema.optional(),
   priority: z.boolean().default(false),
   includeWorkBenefits: z.boolean().default(false),
-  selectedBudgetId: idSchema.optional(),
+  ...aliasFields(
+    "selected_budget_id",
+    "selectedBudgetId",
+    idSchema,
+    "preview_order work_benefits.eligible_budgets"
+  ),
+  ...aliasFields(
+    "budget_id",
+    "budgetId",
+    idSchema,
+    "preview_order work_benefits.eligible_budgets"
+  ),
   applyCredits: z.boolean().default(true)
 };
 
 const promoInputSchema = {
-  cartUuid: idSchema,
-  promoCode: z.string().min(1).max(200),
-  campaignId: idSchema.optional(),
-  adGroupId: idSchema.optional(),
-  adId: idSchema.optional()
+  ...aliasFields("cart_uuid", "cartUuid", idSchema, "show_cart or list_carts"),
+  ...aliasFields(
+    "promo_code",
+    "promoCode",
+    z.string().min(1).max(200),
+    "list_promos"
+  ),
+  ...aliasFields("campaign_id", "campaignId", idSchema, "list_promos"),
+  ...aliasFields("ad_group_id", "adGroupId", idSchema, "list_promos"),
+  ...aliasFields("ad_id", "adId", idSchema, "list_promos")
 };
 
+const workBudgetConfirmationSchema = z
+  .object({
+    type: z.literal("work_budget"),
+    name: z
+      .string()
+      .min(1)
+      .max(300)
+      .optional()
+      .describe(
+        "Preferred: copy name from preview_order work_benefits.eligible_budgets."
+      ),
+    ...aliasFields(
+      "budget_name",
+      "budgetName",
+      z.string().min(1).max(300),
+      "preview_order or the user's confirmation"
+    )
+  })
+  .superRefine((value, context) => {
+    const names = [value.name, value.budget_name, value.budgetName].filter(
+      (entry) => entry !== undefined
+    );
+    if (names.length === 0) {
+      context.addIssue({
+        code: "custom",
+        path: ["name"],
+        message:
+          "Provide name (preferred), budget_name, or budgetName for the work budget."
+      });
+    }
+    if (new Set(names).size > 1) {
+      context.addIssue({
+        code: "custom",
+        path: ["name"],
+        message:
+          "name, budget_name, and budgetName must match when more than one is provided."
+      });
+    }
+  });
+
 function orderReferenceSchema() {
-  return z
-    .object({
-      order_uuid: idSchema
-        .optional()
-        .describe(
-          "Preferred: copy order_uuid exactly from list_orders or order_submit."
-        ),
-      orderUuid: idSchema
-        .optional()
-        .describe("Camel-case alias for order_uuid.")
-    })
-    .refine((value) => Boolean(value.order_uuid || value.orderUuid), {
-      message: "Provide order_uuid (preferred) or orderUuid."
-    });
+  return aliasedObject(
+    aliasFields(
+      "order_uuid",
+      "orderUuid",
+      idSchema,
+      "list_orders or order_submit"
+    ),
+    {
+      required: [["order_uuid", "orderUuid", "order"]]
+    }
+  );
 }
 
 function orderUuidFromInput(input) {
@@ -169,7 +424,7 @@ function register(server, name, config, handler) {
       ...config,
       outputSchema: contractForTool(name).outputSchema
     },
-    handler
+    (input, ...args) => handler(normalizeToolInput(input), ...args)
   );
 }
 
@@ -193,11 +448,21 @@ export function registerDoorDashTools(server, context) {
     {
       title: "Set Default DoorDash Address",
       description:
-        "Change the DoorDash account-wide default address. This affects the app, website, searches, previews, and future checkout links; there is no per-cart address override.",
-      inputSchema: z.object({
-        addressId: idSchema,
-        confirmation: z.literal("SET DEFAULT ADDRESS")
-      }),
+        "Change the DoorDash account-wide default address using address_id from list_addresses. This affects the app, website, searches, previews, and future checkout links; there is no per-cart address override.",
+      inputSchema: aliasedObject(
+        {
+          ...aliasFields(
+            "address_id",
+            "addressId",
+            idSchema,
+            "list_addresses"
+          ),
+          confirmation: z.literal("SET DEFAULT ADDRESS")
+        },
+        {
+          required: [["address_id", "addressId", "address"]]
+        }
+      ),
       annotations: annotations({
         readOnly: false,
         idempotent: true
@@ -213,7 +478,7 @@ export function registerDoorDashTools(server, context) {
       title: "Build DoorDash Grocery List",
       description:
         "Resolve a complete grocery or household shopping list into products. This is stateless and does not create a cart.",
-      inputSchema: z.object({
+      inputSchema: aliasedObject({
         items: z
           .array(
             z.object({
@@ -223,9 +488,16 @@ export function registerDoorDashTools(server, context) {
           )
           .min(1)
           .max(20),
-        storeId: idSchema.optional(),
+        ...aliasFields(
+          "store_id",
+          "storeId",
+          idSchema,
+          "find_nearby_stores or a previous grocery result"
+        ),
         desiredMerchantName: z.string().min(1).max(300).optional(),
         servings: z.number().int().min(1).max(1_000).optional()
+      }, {
+        optional: [["store_id", "storeId", "store"]]
       }),
       annotations: annotations({ readOnly: true })
     },
@@ -239,9 +511,16 @@ export function registerDoorDashTools(server, context) {
       title: "Find DoorDash Store Items",
       description:
         "Search for one or more grocery or retail products inside a specific store. Results are capped to keep catalog payloads usable.",
-      inputSchema: z.object({
-        storeId: idSchema,
+      inputSchema: aliasedObject({
+        ...aliasFields(
+          "store_id",
+          "storeId",
+          idSchema,
+          "find_nearby_stores or build_grocery_list"
+        ),
         queries: z.array(z.string().min(1).max(300)).min(1).max(10)
+      }, {
+        required: [["store_id", "storeId", "store"]]
       }),
       annotations: annotations({ readOnly: true })
     },
@@ -271,11 +550,32 @@ export function registerDoorDashTools(server, context) {
     {
       title: "Get DoorDash Item Details",
       description:
-        "Return current item pricing and options. Item IDs prefixed i_ are restaurant menu items and automatically use restaurant modifier lookup; other IDs use grocery or retail lookup. For restaurant items, menuId is optional because the server can resolve it.",
-      inputSchema: z.object({
-        storeId: idSchema,
-        itemId: idSchema,
-        menuId: idSchema.optional()
+        "Return current item pricing and options. Item IDs prefixed i_ are restaurant menu items and automatically use restaurant modifier lookup; other IDs use grocery or retail lookup. For restaurant items, menu_id is optional because the server can resolve it.",
+      inputSchema: aliasedObject({
+        ...aliasFields(
+          "store_id",
+          "storeId",
+          idSchema,
+          "search, menu, or item-search results"
+        ),
+        ...aliasFields(
+          "item_id",
+          "itemId",
+          idSchema,
+          "get_menu, find_items, or list_orders"
+        ),
+        ...aliasFields(
+          "menu_id",
+          "menuId",
+          idSchema,
+          "get_menu or build_grocery_list"
+        )
+      }, {
+        required: [
+          ["store_id", "storeId", "store"],
+          ["item_id", "itemId", "item"]
+        ],
+        optional: [["menu_id", "menuId", "menu"]]
       }),
       annotations: annotations({ readOnly: true })
     },
@@ -289,8 +589,15 @@ export function registerDoorDashTools(server, context) {
       title: "Get DoorDash Restaurant Menu",
       description:
         "Return a restaurant menu and menu ID. Items with has_modifiers require get_item_details or get_restaurant_item_details before adding so optional add-ons are not lost and every required group is satisfied.",
-      inputSchema: z.object({
-        storeId: idSchema
+      inputSchema: aliasedObject({
+        ...aliasFields(
+          "store_id",
+          "storeId",
+          idSchema,
+          "search_restaurants or get_store_details"
+        )
+      }, {
+        required: [["store_id", "storeId", "store"]]
       }),
       annotations: annotations({ readOnly: true })
     },
@@ -303,11 +610,17 @@ export function registerDoorDashTools(server, context) {
     {
       title: "Get DoorDash Restaurant Item Modifiers",
       description:
-        "RESTAURANT ITEMS ONLY. Return pricing and every recursive modifier choice, including optional add-ons. Modifier groups describe constraints and must not be sent as cart selections. For add_cart_items, send chosen option_id nodes or plain-language requestedOptions and satisfy every group whose min_selections is greater than zero.",
-      inputSchema: z.object({
-        storeId: idSchema,
-        menuId: idSchema,
-        itemId: idSchema
+        "RESTAURANT ITEMS ONLY. Return pricing and every recursive modifier choice, including optional add-ons. Modifier groups describe constraints and must not be sent as cart selections. For add_cart_items, send chosen option_id nodes or plain-language requested_options and satisfy every group whose min_selections is greater than zero.",
+      inputSchema: aliasedObject({
+        ...aliasFields("store_id", "storeId", idSchema, "get_menu"),
+        ...aliasFields("menu_id", "menuId", idSchema, "get_menu"),
+        ...aliasFields("item_id", "itemId", idSchema, "get_menu")
+      }, {
+        required: [
+          ["store_id", "storeId", "store"],
+          ["menu_id", "menuId", "menu"],
+          ["item_id", "itemId", "item"]
+        ]
       }),
       annotations: annotations({ readOnly: true })
     },
@@ -338,8 +651,15 @@ export function registerDoorDashTools(server, context) {
       title: "Get DoorDash Store Details",
       description:
         "Return store identity, business metadata, physical location, and fulfillment capabilities.",
-      inputSchema: z.object({
-        storeId: idSchema
+      inputSchema: aliasedObject({
+        ...aliasFields(
+          "store_id",
+          "storeId",
+          idSchema,
+          "search_restaurants or find_nearby_stores"
+        )
+      }, {
+        required: [["store_id", "storeId", "store"]]
       }),
       annotations: annotations({ readOnly: true })
     },
@@ -352,11 +672,11 @@ export function registerDoorDashTools(server, context) {
     {
       title: "Add DoorDash Cart Items",
       description:
-        "Send every requested line together in one call; never add one item at a time. The server preflights all i_-prefixed restaurant items and every modifier group before making one DoorDash cart write, resolves requestedOptions such as Sweet Corn, and returns all modifier groups without changing the cart when a required choice is missing. itemName labels do not customize items. You may instead copy exact selected option_id entries as nestedOptions: [{\"option_id\":\"o_...\",\"name\":\"Chosen option\"}]; include every group whose min_selections is greater than zero, never pass group_id or extra_id nodes such as e_..., and recurse only when a selected option exposes nested groups. After success, the tool automatically returns checkout_url. Delivery uses the account-wide default address. Quantities are additive and this is not idempotent. With no cartUuid, an empty same-store cart is safely reused; a nonempty cart returns ACTIVE_CART_EXISTS so it cannot be duplicated.",
+        "Send every requested line together in one call; never add one item at a time. Copy store_id, menu_id, item_id, and name directly from menu tools. The server preflights all i_-prefixed restaurant items and every modifier group before making one DoorDash cart write, resolves requested_options such as Sweet Corn, and returns all modifier groups without changing the cart when a required choice is missing. Name labels do not customize items. You may instead copy exact selected option_id entries as nested_options: [{\"option_id\":\"o_...\",\"name\":\"Chosen option\"}]; include every group whose min_selections is greater than zero, never pass group_id or extra_id nodes such as e_..., and recurse only when a selected option exposes nested groups. After success, the tool automatically returns checkout_url. Delivery uses the account-wide default address. Quantities are additive and this is not idempotent. With no cart_uuid, an empty same-store cart is safely reused; a nonempty cart returns ACTIVE_CART_EXISTS so it cannot be duplicated.",
       inputSchema: z
         .object({
-          storeId: idSchema,
-          menuId: idSchema,
+          ...aliasFields("store_id", "storeId", idSchema, "get_menu"),
+          ...aliasFields("menu_id", "menuId", idSchema, "get_menu"),
           items: z
             .array(cartItemSchema)
             .min(1)
@@ -364,7 +684,12 @@ export function registerDoorDashTools(server, context) {
             .describe(
               "The complete batch of every requested cart line. Put differently customized copies on separate lines; use quantity only for truly identical copies."
             ),
-          cartUuid: idSchema.optional(),
+          ...aliasFields(
+            "cart_uuid",
+            "cartUuid",
+            idSchema,
+            "show_cart or list_carts"
+          ),
           fulfillment: fulfillmentSchema.default("delivery"),
           groupCart: z.boolean().default(false),
           spendLimitCents: z
@@ -374,10 +699,49 @@ export function registerDoorDashTools(server, context) {
             .max(2_147_483_647)
             .optional()
         })
+        .superRefine((value, context) => {
+          for (const [snakeName, camelName, label] of [
+            ["store_id", "storeId", "store"],
+            ["menu_id", "menuId", "menu"]
+          ]) {
+            if (!value[snakeName] && !value[camelName]) {
+              context.addIssue({
+                code: "custom",
+                path: [snakeName],
+                message: `Provide ${snakeName} (preferred) or ${camelName} for ${label}.`
+              });
+            }
+            if (
+              value[snakeName] &&
+              value[camelName] &&
+              value[snakeName] !== value[camelName]
+            ) {
+              context.addIssue({
+                code: "custom",
+                path: [snakeName],
+                message: `${snakeName} and ${camelName} must match when both are provided.`
+              });
+            }
+          }
+          if (
+            value.cart_uuid &&
+            value.cartUuid &&
+            value.cart_uuid !== value.cartUuid
+          ) {
+            context.addIssue({
+              code: "custom",
+              path: ["cart_uuid"],
+              message:
+                "cart_uuid and cartUuid must match when both are provided."
+            });
+          }
+        })
         .refine(
           (value) =>
             value.spendLimitCents === undefined ||
-            (value.groupCart && value.cartUuid === undefined),
+            (value.groupCart &&
+              value.cartUuid === undefined &&
+              value.cart_uuid === undefined),
           {
             message:
               "spendLimitCents requires a new group cart and cannot be used with cartUuid."
@@ -397,9 +761,16 @@ export function registerDoorDashTools(server, context) {
     {
       title: "Delete DoorDash Cart",
       description:
-        "Empty and abandon an open cart. Start a fresh cart after deletion.",
-      inputSchema: z.object({
-        cartUuid: idSchema
+        "Empty and abandon an open cart using cart_uuid from list_carts or show_cart. Start a fresh cart after deletion.",
+      inputSchema: aliasedObject({
+        ...aliasFields(
+          "cart_uuid",
+          "cartUuid",
+          idSchema,
+          "list_carts or show_cart"
+        )
+      }, {
+        required: [["cart_uuid", "cartUuid", "cart"]]
       }),
       annotations: annotations({
         readOnly: false,
@@ -417,8 +788,15 @@ export function registerDoorDashTools(server, context) {
       title: "List DoorDash Carts",
       description:
         "List active unsubmitted carts, optionally filtered by store. Use this before additive cart mutations.",
-      inputSchema: z.object({
-        storeId: idSchema.optional()
+      inputSchema: aliasedObject({
+        ...aliasFields(
+          "store_id",
+          "storeId",
+          idSchema,
+          "search_restaurants, find_nearby_stores, or get_menu"
+        )
+      }, {
+        optional: [["store_id", "storeId", "store"]]
       }),
       annotations: annotations({ readOnly: true })
     },
@@ -431,10 +809,20 @@ export function registerDoorDashTools(server, context) {
     {
       title: "Remove DoorDash Cart Item",
       description:
-        "Remove one complete cart line. cartItemId is items[].id from show cart, not the menu item ID.",
-      inputSchema: z.object({
-        cartUuid: idSchema,
-        cartItemId: idSchema
+        "Remove one complete cart line. Copy cart_uuid and items[].cart_item_id from show_cart; cart_item_id is not the menu item ID.",
+      inputSchema: aliasedObject({
+        ...aliasFields("cart_uuid", "cartUuid", idSchema, "show_cart"),
+        ...aliasFields(
+          "cart_item_id",
+          "cartItemId",
+          idSchema,
+          "show_cart items"
+        )
+      }, {
+        required: [
+          ["cart_uuid", "cartUuid", "cart"],
+          ["cart_item_id", "cartItemId", "cart line"]
+        ]
       }),
       annotations: annotations({
         readOnly: false,
@@ -451,9 +839,16 @@ export function registerDoorDashTools(server, context) {
     {
       title: "Show DoorDash Cart",
       description:
-        "Return cart contents and cart-line IDs. This does not return authoritative pricing or delivery address; use preview for those.",
-      inputSchema: z.object({
-        cartUuid: idSchema
+        "Return cart contents and cart-line IDs using cart_uuid from list_carts, reorder, or add_cart_items. This does not return authoritative pricing or delivery address; use preview for those.",
+      inputSchema: aliasedObject({
+        ...aliasFields(
+          "cart_uuid",
+          "cartUuid",
+          idSchema,
+          "list_carts, reorder, or add_cart_items"
+        )
+      }, {
+        required: [["cart_uuid", "cartUuid", "cart"]]
       }),
       annotations: annotations({ readOnly: true })
     },
@@ -466,9 +861,16 @@ export function registerDoorDashTools(server, context) {
     {
       title: "Create DoorDash Checkout Link",
       description:
-        "Create a browser checkout URL without submitting or charging. The URL does not pin an address; DoorDash uses the account-wide default at checkout.",
-      inputSchema: z.object({
-        cartUuid: idSchema
+        "Create a browser checkout URL from cart_uuid without submitting or charging. The URL does not pin an address; DoorDash uses the account-wide default at checkout.",
+      inputSchema: aliasedObject({
+        ...aliasFields(
+          "cart_uuid",
+          "cartUuid",
+          idSchema,
+          "show_cart, list_carts, reorder, or add_cart_items"
+        )
+      }, {
+        required: [["cart_uuid", "cartUuid", "cart"]]
       }),
       annotations: annotations({ readOnly: true })
     },
@@ -497,10 +899,40 @@ export function registerDoorDashTools(server, context) {
     {
       title: "Preview DoorDash Order",
       description:
-        "Return authoritative items, pricing, total, delivery address, ETA, tip suggestions, credits, and work budgets. Delivery uses the account-wide default DoorDash address. Passing fulfillment changes cart mode.",
-      inputSchema: z.object({
-        cartUuid: idSchema,
-        ...previewOptionsSchema
+        "Return authoritative items, pricing, total, delivery address, ETA, tip suggestions, credits, and work budgets for cart_uuid. Delivery uses the account-wide default DoorDash address. Passing fulfillment changes cart mode.",
+      inputSchema: aliasedObject(
+        {
+          ...aliasFields(
+            "cart_uuid",
+            "cartUuid",
+            idSchema,
+            "show_cart, list_carts, reorder, or add_cart_items"
+          ),
+          ...previewOptionsSchema
+        },
+        {
+          required: [["cart_uuid", "cartUuid", "cart"]],
+          optional: [
+            ["scheduled_time", "scheduledTime", "schedule"],
+            ["selected_budget_id", "selectedBudgetId", "work budget"],
+            ["budget_id", "budgetId", "work budget"]
+          ]
+        }
+      ).superRefine((value, context) => {
+        const budgetIds = [
+          value.selected_budget_id,
+          value.selectedBudgetId,
+          value.budget_id,
+          value.budgetId
+        ].filter((entry) => entry !== undefined);
+        if (new Set(budgetIds).size > 1) {
+          context.addIssue({
+            code: "custom",
+            path: ["budget_id"],
+            message:
+              "budget_id, budgetId, selected_budget_id, and selectedBudgetId must match when more than one is provided."
+          });
+        }
       }),
       annotations: annotations({
         readOnly: false,
@@ -567,9 +999,16 @@ export function registerDoorDashTools(server, context) {
     {
       title: "List DoorDash Promotions",
       description:
-        "List consumer- and store-specific campaign promotions eligible at a store.",
-      inputSchema: z.object({
-        storeId: idSchema
+        "List consumer- and store-specific campaign promotions eligible at store_id.",
+      inputSchema: aliasedObject({
+        ...aliasFields(
+          "store_id",
+          "storeId",
+          idSchema,
+          "search_restaurants, find_nearby_stores, or get_menu"
+        )
+      }, {
+        required: [["store_id", "storeId", "store"]]
       }),
       annotations: annotations({ readOnly: true })
     },
@@ -582,8 +1021,18 @@ export function registerDoorDashTools(server, context) {
     {
       title: "Apply DoorDash Promotion",
       description:
-        "Apply a typed or campaign promo to a cart. Campaign promos require all IDs returned by list promos.",
-      inputSchema: z.object(promoInputSchema),
+        "Apply a typed or campaign promo to cart_uuid. Copy promo_code and campaign identifiers directly from list_promos.",
+      inputSchema: aliasedObject(promoInputSchema, {
+        required: [
+          ["cart_uuid", "cartUuid", "cart"],
+          ["promo_code", "promoCode", "promotion"]
+        ],
+        optional: [
+          ["campaign_id", "campaignId", "campaign"],
+          ["ad_group_id", "adGroupId", "ad group"],
+          ["ad_id", "adId", "advertisement"]
+        ]
+      }),
       annotations: annotations({
         readOnly: false,
         idempotent: false
@@ -598,8 +1047,18 @@ export function registerDoorDashTools(server, context) {
     {
       title: "Remove DoorDash Promotion",
       description:
-        "Remove a promo using the same code and campaign IDs used when it was applied.",
-      inputSchema: z.object(promoInputSchema),
+        "Remove a promo using the same promo_code and campaign IDs returned by list_promos and used when it was applied.",
+      inputSchema: aliasedObject(promoInputSchema, {
+        required: [
+          ["cart_uuid", "cartUuid", "cart"],
+          ["promo_code", "promoCode", "promotion"]
+        ],
+        optional: [
+          ["campaign_id", "campaignId", "campaign"],
+          ["ad_group_id", "adGroupId", "ad group"],
+          ["ad_id", "adId", "advertisement"]
+        ]
+      }),
       annotations: annotations({
         readOnly: false,
         destructive: true,
@@ -632,14 +1091,19 @@ export function registerDoorDashTools(server, context) {
       {
         title: "Submit DoorDash Order",
         description:
-          "DANGEROUS: re-preview and then place a DoorDash order using the account-wide default delivery address and charging the confirmed default payment method or work budget. Never retry the same cart.",
-        inputSchema: z.object({
-          cartUuid: idSchema,
+          "DANGEROUS: re-preview and then place cart_uuid using the account-wide default delivery address and charging the confirmed default payment method or work budget. Copy work-benefit IDs from preview_order. Never retry the same cart.",
+        inputSchema: aliasedObject({
+          ...aliasFields(
+            "cart_uuid",
+            "cartUuid",
+            idSchema,
+            "preview_order"
+          ),
           expectedTotalBeforeTipCents: z.number().int().min(0),
           expectedDeliveryAddress: z.string().min(5).max(1_000),
           tipCents: z.number().int().min(0).max(1_000_000),
           tipConfirmed: z.literal(true),
-          paymentConfirmation: z.discriminatedUnion("type", [
+          paymentConfirmation: z.union([
             z.object({
               type: z.literal("card"),
               brand: z.string().min(1).max(80),
@@ -649,21 +1113,58 @@ export function registerDoorDashTools(server, context) {
               type: z.literal("account_default"),
               acknowledgement: z.literal("USE ACCOUNT DEFAULT")
             }),
-            z.object({
-              type: z.literal("work_budget"),
-              budgetName: z.string().min(1).max(300)
-            })
+            workBudgetConfirmationSchema
           ]),
           confirmation: z.literal("PLACE ORDER"),
-          scheduledTime: z.string().datetime({ offset: true }).optional(),
+          ...aliasFields(
+            "scheduled_time",
+            "scheduledTime",
+            z.string().datetime({ offset: true }),
+            "preview_order or an earlier scheduling choice"
+          ),
           fulfillment: fulfillmentSchema.optional(),
           priority: z.boolean().default(false),
           applyCredits: z.boolean().default(true),
-          teamId: idSchema.optional(),
-          budgetId: idSchema.optional(),
-          teamAccountId: idSchema.optional(),
-          expenseCode: z.string().min(1).max(500).optional(),
-          expenseNotes: z.string().min(1).max(2_000).optional()
+          ...aliasFields(
+            "team_id",
+            "teamId",
+            idSchema,
+            "preview_order work_benefits"
+          ),
+          ...aliasFields(
+            "budget_id",
+            "budgetId",
+            idSchema,
+            "preview_order eligible_budgets"
+          ),
+          ...aliasFields(
+            "team_account_id",
+            "teamAccountId",
+            idSchema,
+            "preview_order eligible_budgets"
+          ),
+          ...aliasFields(
+            "expense_code",
+            "expenseCode",
+            z.string().min(1).max(500),
+            "the user's work-expense choice"
+          ),
+          ...aliasFields(
+            "expense_notes",
+            "expenseNotes",
+            z.string().min(1).max(2_000),
+            "the user's work-expense choice"
+          )
+        }, {
+          required: [["cart_uuid", "cartUuid", "cart"]],
+          optional: [
+            ["scheduled_time", "scheduledTime", "schedule"],
+            ["team_id", "teamId", "work-benefits team"],
+            ["budget_id", "budgetId", "work budget"],
+            ["team_account_id", "teamAccountId", "team account"],
+            ["expense_code", "expenseCode", "expense code"],
+            ["expense_notes", "expenseNotes", "expense notes"]
+          ]
         }),
         annotations: annotations({
           readOnly: false,

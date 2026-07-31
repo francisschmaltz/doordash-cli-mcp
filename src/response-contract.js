@@ -2514,6 +2514,33 @@ function plural(count, singular, pluralValue = `${singular}s`) {
   return `${count} ${count === 1 ? singular : pluralValue}`;
 }
 
+function summarizeModifierChoices(groups = []) {
+  return groups
+    .map((group) => {
+      const groupName = group.name || group.group_id || "Modifier";
+      const options = (group.options || [])
+        .filter((option) => option.available !== false)
+        .map((option) => {
+          const name = option.name || option.option_id || "Unnamed option";
+          return option.option_id ? `${name} [${option.option_id}]` : name;
+        });
+      return options.length ? `${groupName}: ${options.join(", ")}` : groupName;
+    })
+    .join("; ");
+}
+
+function summarizeCartErrors(itemErrors) {
+  const issues = itemErrors.map((itemError, index) => {
+    const item = itemError.item || {};
+    const itemName =
+      item.name || item.item_id || `cart item ${index + 1}`;
+    const message = itemError.message || "This item needs attention.";
+    const choices = summarizeModifierChoices(itemError.modifier_groups);
+    return `${index + 1}) ${itemName}: ${message}${choices ? ` Available choices: ${choices}.` : ""}`;
+  });
+  return `No cart changes were made. Fix all ${plural(itemErrors.length, "item issue")} before retrying add_cart_items once; never repeat the unchanged input. ${issues.join(" ")}`;
+}
+
 export function summarizeResponse(value) {
   if (value.error) {
     return `${value.error.code}: ${value.error.message}`;
@@ -2538,6 +2565,9 @@ export function summarizeResponse(value) {
       return `Resolved ${plural(value.items.length, "grocery item")}${value.store?.name ? ` at ${value.store.name}` : ""}.`;
     case "cart": {
       const errors = value.item_errors?.length || 0;
+      if (errors) {
+        return summarizeCartErrors(value.item_errors);
+      }
       return `${plural(value.items.length, "cart line")}${value.store?.name ? ` at ${value.store.name}` : ""}${errors ? `; ${plural(errors, "item")} still need${errors === 1 ? "s" : ""} attention` : ""}${value.checkout_url ? `. Checkout: ${value.checkout_url}` : "."}`;
     }
     case "cart_list":
@@ -2597,14 +2627,12 @@ export function toToolResult(structuredContent, { isError = false } = {}) {
     {
       type: "text",
       text: summarizeResponse(structuredContent)
-    }
-  ];
-  if (!resultIsError) {
-    content.push({
+    },
+    {
       type: "text",
       text: JSON.stringify(structuredContent)
-    });
-  }
+    }
+  ];
   return {
     content,
     structuredContent,

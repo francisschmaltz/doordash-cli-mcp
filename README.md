@@ -110,17 +110,24 @@ confirmation contract is still mandatory.
 
 ## MCP tools
 
-Every typed tool advertises an MCP `outputSchema`. Successful calls return a
-readable result plus the same machine payload through both client-compatible
-channels:
+Every typed tool advertises an MCP `outputSchema`. Calls return a readable
+result plus the same machine payload through both client-compatible channels:
 
 - `content[0].text` is a short readable summary.
 - `content[1].text` is minified JSON, exactly equal to
   `JSON.stringify(structuredContent)`.
 - `structuredContent` is the stable, versioned machine result.
 
-Errors return readable text, a structured error, and `isError: true`; they do
-not add the JSON text copy.
+Errors also return the JSON text copy and `isError: true`. This keeps recovery
+details visible to MCP clients that ignore `structuredContent`. Cart preflight
+errors put missing choices in the readable text and tell callers not to repeat
+unchanged input.
+
+Tool-to-tool handoffs use the response field names directly. Snake-case fields
+such as `address_id`, `store_id`, `menu_id`, `item_id`, `cart_uuid`,
+`cart_item_id`, `order_uuid`, `budget_id`, and promotion IDs are the preferred
+inputs everywhere they are consumed. Existing camel-case inputs remain aliases.
+If both forms are sent, they must match.
 
 The contract stays compact. Money is a floating-point dollar number rounded to
 two decimals. An ETA is one `delivery_time` string, including a range such as
@@ -159,7 +166,7 @@ location override. The wrapper returns an error instead of guessing when
 DoorDash has no marked default or the default has no coordinates.
 
 `get_item_details` automatically routes `i_`-prefixed menu IDs through the
-restaurant modifier endpoint and can resolve an omitted `menuId`. Other item
+restaurant modifier endpoint and can resolve an omitted `menu_id`. Other item
 IDs continue to use grocery or retail details.
 
 ### Carts
@@ -177,14 +184,14 @@ If a required choice is unresolved, it returns every modifier group and makes
 no cart changes. A required group with only one available choice is selected
 automatically; preferences with multiple choices are never guessed.
 
-Plain-language choices may be sent per line in `requestedOptions`, such as
+Plain-language choices may be sent per line in `requested_options`, such as
 `["Rotisserie Chicken", "Sweet Corn", "Utensils"]`. They are resolved against
 the current modifier tree, and any unmatched choice blocks the entire batch. A
-customized `itemName` such as `Spicy TanTan with Sweet Corn` is also recognized
+customized `name` such as `Spicy TanTan with Sweet Corn` is also recognized
 for compatibility, then normalized back to the real menu name. Prefer
-`requestedOptions`; `itemName` itself does not customize an item.
+`requested_options`; `name` itself does not customize an item.
 
-Exact choices may instead be copied into `nestedOptions` as
+Exact choices may instead be copied into `nested_options` as
 `{"option_id":"o_...","name":"Chosen option"}`; `optionId` and legacy `id`
 remain accepted aliases. Do not pass modifier group IDs such as `e_...`.
 Ordinary selections stay flat, while `options` is only for choices that expose
@@ -195,12 +202,12 @@ browser `checkout_url`. If DoorDash adds the items but link creation fails, the
 tool preserves the cart result and tells the caller to use
 `create_checkout_link`.
 
-When `cartUuid` is omitted, the wrapper checks for an active cart at that store
+When `cart_uuid` is omitted, the wrapper checks for an active cart at that store
 before adding. An empty cart left by an earlier failed add is reused
 automatically. A nonempty cart returns `ACTIVE_CART_EXISTS` with
 `recovery_tool: show_cart` instead of silently duplicating items. Inspect it,
 then return its checkout link when it already matches, explicitly extend it
-using its `cartUuid`, or delete and replace it.
+using its `cart_uuid`, or delete and replace it.
 
 ### Orders
 
@@ -211,10 +218,6 @@ using its `cartUuid`, or delete and replace it.
 - `get_receipt`
 - `order_status`
 - `order_submit` — permission-gated
-
-`get_receipt`, `reorder`, and `order_status` accept the output field
-`order_uuid` directly. The older camel-case `orderUuid` input remains an alias,
-so an MCP client never has to translate the wrapper's own order IDs.
 
 Preview supports scheduled orders, delivery/pickup, Priority delivery, credit
 opt-out, and work-benefit budgets.
