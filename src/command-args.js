@@ -13,9 +13,13 @@ function booleanFlag(args, flag, enabled) {
 }
 
 function nestedOptionToCli(optionValue) {
+  const id =
+    optionValue.option_id ??
+    optionValue.optionId ??
+    optionValue.id;
   return {
-    id: optionValue.id,
-    name: optionValue.name,
+    id,
+    name: optionValue.name || id,
     quantity: optionValue.quantity ?? 1,
     ...(optionValue.options?.length
       ? { options: optionValue.options.map(nestedOptionToCli) }

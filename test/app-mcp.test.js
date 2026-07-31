@@ -187,8 +187,10 @@ test("cart tools instruct callers to satisfy required options and return checkou
   assert.ok(addTool);
   assert.match(addTool.description, /every modifier group/);
   assert.match(addTool.description, /selected option_id/);
+  assert.match(addTool.description, /"option_id":"o_\.\.\."/);
   assert.match(addTool.description, /never pass group_id or extra_id/);
   assert.match(addTool.description, /automatically return.*checkout_url/);
+  assert.match(JSON.stringify(addTool.inputSchema), /"option_id"/);
   assert.ok(detailTool);
   assert.match(detailTool.description, /must not be sent as cart selections/);
 
@@ -207,6 +209,9 @@ test("add cart returns a checkout URL after adding fully selected items", async 
     securityStore: store,
     runCli: async (args) => {
       calls.push(args);
+      if (args[0] === "cart" && args[1] === "list") {
+        return cliResult({ carts: [] });
+      }
       if (args[0] === "cart" && args[1] === "add-items") {
         return cliResult({
           success: true,
@@ -252,12 +257,11 @@ test("add cart returns a checkout URL after adding fully selected items", async 
             quantity: 2,
             nestedOptions: [
               {
-                id: "o_31172333376",
+                option_id: "o_31172333376",
                 name: "Oaxacan Refried Black"
               },
               {
-                id: "o_42978512124",
-                name: "Rotisserie Chicken"
+                option_id: "o_42978512124"
               }
             ]
           }
@@ -278,16 +282,21 @@ test("add cart returns a checkout URL after adding fully selected items", async 
   assert.deepEqual(
     calls.map((args) => args.slice(0, 2)),
     [
+      ["cart", "list"],
       ["cart", "add-items"],
       ["order", "checkout-url"]
     ]
   );
   const requestedItems = JSON.parse(
-    calls[0][calls[0].indexOf("--items-json") + 1]
+    calls[1][calls[1].indexOf("--items-json") + 1]
   );
   assert.deepEqual(
     requestedItems[0].nested_options.map((option) => option.id),
     ["o_31172333376", "o_42978512124"]
+  );
+  assert.equal(
+    requestedItems[0].nested_options[1].name,
+    "o_42978512124"
   );
 
   await mcpHandler.close();
@@ -333,6 +342,7 @@ test("add cart preserves successful items when checkout link creation fails", as
       arguments: {
         storeId: "store-1",
         menuId: "menu-1",
+        cartUuid: "cart-1",
         items: [
           {
             itemId: "item-1",
@@ -352,6 +362,82 @@ test("add cart preserves successful items when checkout link creation fails", as
   assert.match(
     response.body.result.structuredContent.warnings[0],
     /create_checkout_link/
+  );
+
+  await mcpHandler.close();
+  store.close();
+});
+
+test("add cart refuses to duplicate an active same-store cart", async () => {
+  const store = new SecurityStore({ databasePath: ":memory:" });
+  const token = store.createToken({
+    name: "Open WebUI",
+    allowPurchases: false
+  });
+  const calls = [];
+  const { mcpHandler } = createTestApp({
+    securityStore: store,
+    runCli: async (args) => {
+      calls.push(args);
+      if (args[0] === "cart" && args[1] === "list") {
+        return cliResult({
+          carts: [
+            {
+              cart_uuid: "cart-existing",
+              store_id: "store-1",
+              store_name: "Mercado",
+              items: [
+                {
+                  id: "line-1",
+                  item_id: "item-1",
+                  name: "Enchiladas Verdes",
+                  quantity: 2
+                }
+              ]
+            }
+          ]
+        });
+      }
+      throw new Error(`Unexpected CLI call: ${args.join(" ")}`);
+    }
+  });
+
+  const response = await mcpRequest(
+    mcpHandler,
+    authInfo(store, token.token),
+    "tools/call",
+    {
+      name: "add_cart_items",
+      arguments: {
+        storeId: "store-1",
+        menuId: "menu-1",
+        items: [
+          {
+            itemId: "item-1",
+            itemName: "Enchiladas Verdes",
+            quantity: 2
+          }
+        ]
+      }
+    }
+  );
+
+  assert.equal(response.body.result.isError, true);
+  assert.equal(
+    response.body.result.structuredContent.error.code,
+    "ACTIVE_CART_EXISTS"
+  );
+  assert.equal(
+    response.body.result.structuredContent.error.recovery_tool,
+    "show_cart"
+  );
+  assert.match(
+    response.body.result.structuredContent.error.message,
+    /cart-existing/
+  );
+  assert.deepEqual(
+    calls.map((args) => args.slice(0, 2)),
+    [["cart", "list"]]
   );
 
   await mcpHandler.close();
@@ -388,7 +474,7 @@ test("add cart rejects modifier-group IDs as selected options", async () => {
             itemName: "Item",
             nestedOptions: [
               {
-                id: "e_7116953698",
+                option_id: "e_7116953698",
                 name: "CHOICE of BEANS"
               }
             ]

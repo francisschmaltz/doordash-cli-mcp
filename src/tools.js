@@ -41,17 +41,32 @@ const verticalSchema = z.enum([
   "nv"
 ]);
 
+function selectedOptionId(option) {
+  return option.option_id || option.optionId || option.id;
+}
+
 const selectedCartOptionSchema = z.lazy(() =>
   z
     .object({
-      id: idSchema.describe(
-        "A selected option_id from a modifier group. Never pass the modifier group's group_id or extra_id."
-      ),
+      option_id: idSchema
+        .optional()
+        .describe(
+          "Preferred: copy option_id exactly from the chosen modifier option returned by get_menu, get_restaurant_item_details, or item_errors."
+        ),
+      optionId: idSchema
+        .optional()
+        .describe("Camel-case alias for option_id."),
+      id: idSchema
+        .optional()
+        .describe("Legacy alias for option_id."),
       name: z
         .string()
         .min(1)
         .max(500)
-        .describe("The selected option name returned with option_id."),
+        .optional()
+        .describe(
+          "The selected option name. Optional; when omitted, the wrapper uses the option ID."
+        ),
       quantity: z.number().int().min(1).default(1),
       options: z
         .array(selectedCartOptionSchema)
@@ -61,7 +76,11 @@ const selectedCartOptionSchema = z.lazy(() =>
           "Only for a selected option that itself exposes nested modifier groups: include the selected child options here."
         )
     })
-    .refine((option) => !option.id.startsWith("e_"), {
+    .refine((option) => Boolean(selectedOptionId(option)), {
+      message:
+        "Each nestedOptions entry requires option_id (preferred), optionId, or id."
+    })
+    .refine((option) => !selectedOptionId(option)?.startsWith("e_"), {
       message:
         "nestedOptions entries must be selected option IDs, not modifier-group IDs such as e_...."
     })
@@ -76,7 +95,7 @@ const cartItemSchema = z.object({
     .max(100)
     .optional()
     .describe(
-      "Selected options only. Include enough option_id entries to satisfy every modifier group whose min_selections is greater than zero. Keep ordinary selections in this top-level list; never include group_id or extra_id nodes."
+      "Selected options only. Copy option_id and name from each chosen option. Include enough entries to satisfy every modifier group whose min_selections is greater than zero. Keep ordinary selections in this top-level list; never include group_id or extra_id nodes."
     )
 });
 
@@ -299,7 +318,7 @@ export function registerDoorDashTools(server, context) {
     {
       title: "Add DoorDash Cart Items",
       description:
-        "Add items to a restaurant or retail cart, then automatically return a browser checkout_url whenever the cart contains added items. Before calling, inspect item details and include selected option_id entries for every modifier group whose min_selections is greater than zero. nestedOptions contains selected options only: keep ordinary selections flat, never pass group_id or extra_id nodes such as e_..., and use recursive options only when a selected option exposes its own nested modifier groups. Delivery uses the account-wide default DoorDash address; there is no per-cart address input. Quantities are additive and this is not idempotent. Check same-store carts first; partial failures may still add some items.",
+        "Add items to a restaurant or retail cart, then automatically return a browser checkout_url whenever the cart contains added items. Before calling, inspect item details and include selected option_id entries for every modifier group whose min_selections is greater than zero. Copy the returned fields directly: nestedOptions: [{\"option_id\":\"o_...\",\"name\":\"Chosen option\"}]. nestedOptions contains selected options only: keep ordinary selections flat, never pass group_id or extra_id nodes such as e_..., and use recursive options only when a selected option exposes its own nested modifier groups. Delivery uses the account-wide default DoorDash address; there is no per-cart address input. Quantities are additive and this is not idempotent. When cartUuid is omitted, the server checks for an active same-store cart and refuses to add if one exists; follow recovery_tool show_cart, then either return its checkout link, extend it with that cartUuid after confirmation, or delete and replace it. Partial failures may still add some items.",
       inputSchema: z
         .object({
           storeId: idSchema,

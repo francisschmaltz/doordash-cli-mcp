@@ -359,9 +359,11 @@ test("partial cart additions preserve successful items and required choices", ()
     },
     item_errors: [
       {
-        item_id: "item-2",
-        item_name: "Combo",
-        quantity: 1,
+        request: {
+          item_id: "item-2",
+          item_name: "Combo",
+          quantity: 1
+        },
         error_message: "Choose a drink.",
         required_options: [
           {
@@ -383,6 +385,11 @@ test("partial cart additions preserve successful items and required choices", ()
 
   assert.equal(projected.items[0].cart_item_id, "line-1");
   assert.equal(projected.created_at, "2025-11-12T16:00:00.000Z");
+  assert.deepEqual(projected.item_errors[0].item, {
+    item_id: "item-2",
+    name: "Combo",
+    quantity: 1
+  });
   assert.equal(
     projected.item_errors[0].modifier_groups[0].options[0].option_id,
     "cola"
@@ -405,7 +412,17 @@ test("cart projections preserve the checkout URL", () => {
           id: "line-1",
           item_id: "item-1",
           name: "Item",
-          quantity: 1
+          quantity: 1,
+          nested_options: [
+            {
+              id: "option-1",
+              quantity: 1,
+              item_extra_option: {
+                id: "option-1",
+                name: "Chicken"
+              }
+            }
+          ]
         }
       ]
     }
@@ -415,6 +432,12 @@ test("cart projections preserve the checkout URL", () => {
     projected.checkout_url,
     "https://www.doordash.test/checkout/cart-1"
   );
+  assert.deepEqual(projected.items[0].selected_options, [
+    {
+      value: "Chicken",
+      quantity: 1
+    }
+  ]);
 });
 
 test("upstream structural drift becomes a typed contract error", () => {

@@ -13,6 +13,7 @@ import {
   addCartItemsArgs,
   checkoutLinkArgs,
   listAddressesArgs,
+  listCartsArgs,
   listPaymentMethodsArgs,
   orderStatusArgs,
   previewOrderArgs,
@@ -39,7 +40,7 @@ const PUBLIC_DIR = path.resolve(SOURCE_DIR, "..", "public");
 const LOGIN_PATH = path.join(PUBLIC_DIR, "login.html");
 const LOGIN_SCRIPT_PATH = path.join(PUBLIC_DIR, "login.js");
 const STYLES_PATH = path.join(PUBLIC_DIR, "styles.css");
-const SERVER_VERSION = "0.4.0";
+const SERVER_VERSION = "0.4.1";
 const TERMINAL_ORDER_STATUSES = new Set([
   "successful",
   "action_required",
@@ -326,6 +327,28 @@ export function createDoorDashApp({
 
   async function addCartItems(input) {
     try {
+      if (!input.cartUuid) {
+        const cartList = await executeCli(
+          listCartsArgs({ storeId: input.storeId }),
+          {
+            project: (data) =>
+              projectWithContract(contracts.cartList, data)
+          }
+        );
+        const existingCart = cartList.carts.find(
+          (cart) => cart.cart_uuid
+        );
+        if (existingCart) {
+          throw new DoorDashCliError(
+            `An active DoorDash cart already exists at this store (${existingCart.cart_uuid}). No items were added. Call show_cart with that cartUuid first. If it already matches the request, call create_checkout_link; otherwise ask whether to extend it using that cartUuid or replace it with delete_cart.`,
+            {
+              code: "ACTIVE_CART_EXISTS",
+              cartUuid: existingCart.cart_uuid
+            }
+          );
+        }
+      }
+
       const addResult = await executeCli(addCartItemsArgs(input), {
         project: (data) => data
       });

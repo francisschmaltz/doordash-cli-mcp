@@ -169,14 +169,22 @@ DoorDash has no marked default or the default has no coordinates.
 The add operation is additive and non-idempotent. It supports delivery/pickup,
 recursive modifiers, group carts, and participant spending limits. Before
 adding an item, satisfy every modifier group whose `min_selections` is greater
-than zero. Pass selected option IDs in `nestedOptions`; do not pass modifier
-group IDs such as `e_...`. Ordinary selections stay flat, while `options` is
-only for choices that expose another nested modifier group.
+than zero. Copy each selected option into `nestedOptions` as
+`{"option_id":"o_...","name":"Chosen option"}`; `optionId` and legacy `id`
+remain accepted aliases. Do not pass modifier group IDs such as `e_...`.
+Ordinary selections stay flat, while `options` is only for choices that expose
+another nested modifier group.
 
 After a successful add, `add_cart_items` automatically creates and returns a
 browser `checkout_url`. If DoorDash adds the items but link creation fails, the
 tool preserves the cart result and tells the caller to use
 `create_checkout_link`.
+
+When `cartUuid` is omitted, the wrapper checks for an active cart at that store
+before adding. If one exists, it returns `ACTIVE_CART_EXISTS` with
+`recovery_tool: show_cart` instead of silently duplicating items. Inspect that
+cart, then return its checkout link when it already matches, explicitly extend
+it using its `cartUuid`, or delete and replace it.
 
 ### Orders
 

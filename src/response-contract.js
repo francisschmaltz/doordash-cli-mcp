@@ -689,6 +689,7 @@ function normalizeItem(value, { cartLine = false } = {}) {
   const selectedOptions = normalizeSelectedOptions(
     first(
       source.selected_options,
+      source.nested_options,
       cartLine && !looksLikeModifierGroups(source.options)
         ? source.options
         : undefined
@@ -1614,7 +1615,9 @@ function cartProject(data) {
   const cartData = normalizeCart(source);
   const itemErrors = rawErrors.map((entry) => {
     const sourceEntry = asObject(entry) || {};
-    const item = normalizeItem(sourceEntry.item || sourceEntry);
+    const item = normalizeItem(
+      sourceEntry.item || sourceEntry.request || sourceEntry
+    );
     const errorItem = compactRecord([
       ["item_id", item.item_id],
       ["name", item.name],
@@ -2411,6 +2414,9 @@ function errorCode(error) {
 }
 
 function recoveryToolFor(code, message) {
+  if (code === "ACTIVE_CART_EXISTS") {
+    return "show_cart";
+  }
   if (
     code === "AGENTIC_RESTRICTED_ITEM_NOT_ALLOWED" ||
     /restricted item|finish.*browser|verification/i.test(message)

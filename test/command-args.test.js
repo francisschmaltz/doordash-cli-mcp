@@ -76,10 +76,16 @@ test("builds nested additive cart arguments", () => {
           quantity: 2,
           nestedOptions: [
             {
-              id: "protein-1",
+              option_id: "protein-1",
               name: "Chicken",
               quantity: 1,
-              options: [{ id: "sauce-1", name: "Hot", quantity: 1 }]
+              options: [
+                {
+                  option_id: "sauce-1",
+                  name: "Hot",
+                  quantity: 1
+                }
+              ]
             }
           ]
         }
