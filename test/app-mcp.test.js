@@ -3438,6 +3438,7 @@ test("preview submit_context hands canonical dollars and flags to order_submit",
   const previewResult = {
     success: true,
     cart_uuid: "cart-handoff",
+    items: [],
     quote: {
       id: "cart-handoff",
       total_before_tip: {
@@ -3541,6 +3542,8 @@ test("preview submit_context hands canonical dollars and flags to order_submit",
   );
 
   assert.equal(preview.body.result.isError, undefined);
+  assert.equal(preview.body.result.structuredContent.items.length, 1);
+  assert.equal(preview.body.result.structuredContent.items[0].name, "Pizza");
   const submitContext =
     preview.body.result.structuredContent.submit_context;
   assert.match(

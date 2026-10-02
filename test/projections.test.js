@@ -833,6 +833,72 @@ test("preview separates totals, floating-dollar tip suggestions, and quote ETA",
   );
 });
 
+test("empty item aliases do not hide populated order-preview quote lines", () => {
+  const names = ["Frosted Sodas", "Grilled Chicken Sandwich", "Spicy Chicken Sandwich Deluxe Meal"];
+  const quote = {
+    delivery_address: { printable_address: "123 Main St, Oakland, CA 94611" },
+    total_before_tip: { unit_amount: 4163 },
+    store_order_cart: {
+      is_consumer_pickup: false,
+      orders: [{
+        order_items: names.map((name, index) => ({
+          id: `line-${index + 1}`,
+          quantity: index + 1,
+          item: { id: `item-${index + 1}`, name },
+          unit_price_monetary_fields: { unit_amount: 1000 + index }
+        }))
+      }]
+    }
+  };
+  for (const aliases of [
+    { items: [] },
+    { order_items: [] },
+    { ordered_items: [] },
+    { orders: [{ order_items: [] }] },
+    { items: [], order_items: [], ordered_items: [] }
+  ]) {
+    const projected = projectWithContract(contracts.orderPreview, {
+      success: true,
+      cart_uuid: "cart-preview-aliases",
+      mcp_preview_token: "preview-token",
+      mcp_preview_options: { fulfillment: "delivery", priority: false, apply_credits: true },
+      ...aliases,
+      quote
+    });
+    assert.deepEqual(projected.items.map((item) => item.name), names);
+    assert.deepEqual(projected.items.map((item) => item.cart_item_id), ["line-1", "line-2", "line-3"]);
+    assert.deepEqual(projected.items.map((item) => item.quantity), [1, 2, 3]);
+    assert.deepEqual(projected.items.map((item) => item.price), [10, 10.01, 10.02]);
+    assert.equal(projected.pricing.total_before_tip, 41.63);
+    const result = toToolResult(projected);
+    assert.match(result.content[0].text, /3 items, \$41\.63 before tip/);
+    assert.deepEqual(JSON.parse(result.content[1].text).items, result.structuredContent.items);
+  }
+});
+
+test("populated order item aliases remain authoritative and empty orders remain empty", () => {
+  for (const quoteItems of [[], [{ id: "line-stale", item: { id: "item-stale", name: "Stale item" } }]]) {
+    const projected = projectWithContract(contracts.receipt, {
+      order_uuid: "order-item-aliases",
+      items: [{ item_id: "item-current", name: "Current item", quantity: 1 }],
+      quote: {
+        total_before_tip: { unit_amount: 1000 },
+        store_order_cart: { orders: [{ order_items: quoteItems }] }
+      }
+    });
+    assert.deepEqual(projected.items.map((item) => item.name), ["Current item"]);
+  }
+  const empty = projectWithContract(contracts.receipt, {
+    order_uuid: "order-empty",
+    items: [],
+    quote: {
+      total_before_tip: { unit_amount: 1000 },
+      store_order_cart: { orders: [{ order_items: [] }] }
+    }
+  });
+  assert.deepEqual(empty.items, []);
+});
+
 test("pickup preview uses a null delivery address in submit_context", () => {
   const projected = projectWithContract(contracts.orderPreview, {
     success: true,

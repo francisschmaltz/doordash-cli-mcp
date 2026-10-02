@@ -1550,12 +1550,12 @@ function normalizeOrder(value, options = {}) {
     (entry) => Array.isArray(entry) && entry.length
   );
   const firstSourceItems = sourceItemAliases.find(Array.isArray);
+  const quotedItems = quoteItems(quote, { menuId, orderTarget });
   const itemsSource =
     options.preferPreview && Array.isArray(previewItems)
       ? previewItems
       : nonEmptySourceItems ||
-        firstSourceItems ||
-        quoteItems(quote, { menuId, orderTarget });
+        (quotedItems?.length ? quotedItems : firstSourceItems || quotedItems);
   const itemLimit =
     Number.isInteger(options.itemLimit) && options.itemLimit >= 0
       ? options.itemLimit
