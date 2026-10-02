@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { createDoorDashApp } from "../src/app.js";
-import { SecurityStore } from "../src/security-store.js";
+import { MemorySecurityStore as SecurityStore } from "./helpers/memory-security-store.js";
 
 function createTestApp(options) {
   return createDoorDashApp({
@@ -114,7 +114,7 @@ test("purchase tools appear only for tokens with the checkbox enabled", async ()
     2
   );
   const purchaseNames = purchaseList.body.result.tools.map((tool) => tool.name);
-  assert.equal(purchaseNames.length, 25);
+  assert.equal(purchaseNames.length, 23);
   assert.ok(
     JSON.stringify(purchaseList.body.result.tools).length < 60_000,
     "purchase-enabled tools/list should stay below 60 KB"
@@ -134,9 +134,9 @@ test("purchase tools appear only for tokens with the checkbox enabled", async ()
   ).inputSchema.properties.max;
   assert.equal(orderListMax.default, 10);
   assert.equal(orderListMax.maximum, 25);
-  assert.equal(
-    purchaseNames.some((name) => name.startsWith("doordash_")),
-    false
+  assert.deepEqual(
+    purchaseNames.filter((name) => name.startsWith("doordash_")),
+    ["doordash_auth"]
   );
   for (const tool of purchaseList.body.result.tools) {
     assertTypedOutputSchema(tool);
@@ -444,6 +444,7 @@ test("cart tools instruct callers to satisfy required options and return checkou
   assert.ok(menuTool);
   assert.deepEqual(menuTool.inputSchema.required, ["store_id"]);
   assert.equal("menu_id" in menuTool.inputSchema.properties, false);
+  assert.equal("query" in menuTool.inputSchema.properties, false);
   assert.ok(reorderTool);
   assert.match(
     reorderTool.description,
@@ -482,13 +483,11 @@ test("generic item details auto-routes restaurant IDs and resolves the menu", as
     securityStore: store,
     runCli: async (args) => {
       calls.push(args);
-      if (args[0] === "store-details") {
+      if (args[0] === "menu") {
         return cliResult({
-          store: {
-            store_id: "store-1",
-            store_name: "Ramen Shop",
-            menu_id: "menu-1"
-          }
+          menu_id: "menu-1",
+          store: { store_id: "store-1", store_name: "Ramen Shop" },
+          items: [{ item_id: "i_12901175286", name: "Spicy TanTan" }]
         });
       }
       if (args[0] === "restaurant-item-details") {
@@ -546,7 +545,7 @@ test("generic item details auto-routes restaurant IDs and resolves the menu", as
   );
   assert.deepEqual(
     calls.map((args) => args[0]),
-    ["store-details", "restaurant-item-details"]
+    ["menu", "restaurant-item-details"]
   );
   assert.equal(
     calls[1][calls[1].indexOf("--item-id") + 1],
@@ -557,7 +556,7 @@ test("generic item details auto-routes restaurant IDs and resolves the menu", as
   store.close();
 });
 
-test("get_menu query returns only matching menu items", async () => {
+test("get_menu returns the complete menu", async () => {
   const store = new SecurityStore({ databasePath: ":memory:" });
   const token = store.createToken({
     name: "Open WebUI",
@@ -591,8 +590,7 @@ test("get_menu query returns only matching menu items", async () => {
     {
       name: "get_menu",
       arguments: {
-        store_id: "store-1",
-        query: "Spicy Tan Tan Men"
+        store_id: "store-1"
       }
     }
   );
@@ -600,29 +598,26 @@ test("get_menu query returns only matching menu items", async () => {
   assert.equal(response.body.result.isError, undefined);
   assert.deepEqual(
     response.body.result.structuredContent.items.map((item) => item.item_id),
-    ["i_ramen"]
+    ["i_ramen", "i_rice"]
   );
 
   await mcpHandler.close();
   store.close();
 });
 
-test("get_menu query does not reverse-match shorter item names", async () => {
+test("get_menu rejects the removed query input before the CLI", async () => {
   const store = new SecurityStore({ databasePath: ":memory:" });
   const token = store.createToken({
     name: "Open WebUI",
     allowPurchases: false
   });
+  let cliCalls = 0;
   const { mcpHandler } = createTestApp({
     securityStore: store,
-    runCli: async () =>
-      cliResult({
-        menu_id: "menu-1",
-        items: [
-          { item_id: "i_tea", name: "Tea" },
-          { item_id: "i_steak", name: "Steak Frites" }
-        ]
-      })
+    runCli: async () => {
+      cliCalls += 1;
+      throw new Error("The CLI must not run for removed input.");
+    }
   });
 
   const response = await mcpRequest(
@@ -638,37 +633,14 @@ test("get_menu query does not reverse-match shorter item names", async () => {
     }
   );
 
-  assert.deepEqual(
-    response.body.result.structuredContent.items.map(
-      (item) => item.item_id
-    ),
-    ["i_steak"]
-  );
-  const teaResponse = await mcpRequest(
-    mcpHandler,
-    authInfo(store, token.token),
-    "tools/call",
-    {
-      name: "get_menu",
-      arguments: {
-        store_id: "store-1",
-        query: "tea"
-      }
-    },
-    2
-  );
-  assert.deepEqual(
-    teaResponse.body.result.structuredContent.items.map(
-      (item) => item.item_id
-    ),
-    ["i_tea"]
-  );
+  assert.equal(response.body.result.isError, true);
+  assert.equal(cliCalls, 0);
 
   await mcpHandler.close();
   store.close();
 });
 
-test("get_menu returns an empty result for a valid category-only query miss", async () => {
+test("get_menu preserves category-only menu items", async () => {
   const store = new SecurityStore({ databasePath: ":memory:" });
   const token = store.createToken({
     name: "Open WebUI",
@@ -700,17 +672,15 @@ test("get_menu returns an empty result for a valid category-only query miss", as
     {
       name: "get_menu",
       arguments: {
-        store_id: "store-1",
-        query: "Spicy Tan Tan Men"
+        store_id: "store-1"
       }
     }
   );
 
   assert.equal(response.body.result.isError, undefined);
-  assert.deepEqual(response.body.result.structuredContent.items, []);
-  assert.match(
-    response.body.result.content[0].text,
-    /Do not repeat it unchanged.*without query/
+  assert.deepEqual(
+    response.body.result.structuredContent.items.map((item) => item.item_id),
+    ["i_rice"]
   );
 
   await mcpHandler.close();
@@ -830,21 +800,6 @@ test("every emitted identifier is accepted by its consuming tool", async () => {
     get_receipt: ["order_uuid"],
     reorder: ["order_uuid"],
     order_status: ["order_uuid"],
-    list_promos: ["store_id"],
-    apply_promo: [
-      "cart_uuid",
-      "promo_code",
-      "campaign_id",
-      "ad_group_id",
-      "ad_id"
-    ],
-    remove_promo: [
-      "cart_uuid",
-      "promo_code",
-      "campaign_id",
-      "ad_group_id",
-      "ad_id"
-    ],
     order_submit: [
       "cart_uuid",
       "preview_token",
@@ -892,14 +847,6 @@ test("every emitted identifier is accepted by its consuming tool", async () => {
   ]) {
     assert.match(addSchema, new RegExp(`"${field}"`));
   }
-  for (const removedTool of [
-    "activity",
-    "get_restaurant_item_details",
-    "run"
-  ]) {
-    assert.equal(tools.has(removedTool), false);
-  }
-
   const publicSchemas = JSON.stringify(
     [...tools.values()].map((tool) => tool.inputSchema)
   );
@@ -925,7 +872,7 @@ test("every emitted identifier is accepted by its consuming tool", async () => {
   store.close();
 });
 
-test("snake-case IDs route through address, item, cart, and promo tools", async () => {
+test("snake-case IDs route through address, item, cart, and preview tools", async () => {
   const store = new SecurityStore({ databasePath: ":memory:" });
   const token = store.createToken({
     name: "Open WebUI",
@@ -1023,16 +970,6 @@ test("snake-case IDs route through address, item, cart, and promo tools", async 
       }
     },
     {
-      name: "apply_promo",
-      arguments: {
-        cart_uuid: "cart-1",
-        promo_code: "SAVE",
-        campaign_id: "campaign-1",
-        ad_group_id: "group-1",
-        ad_id: "ad-1"
-      }
-    },
-    {
       name: "preview_order",
       arguments: {
         cart_uuid: "cart-1",
@@ -1078,20 +1015,6 @@ test("snake-case IDs route through address, item, cart, and promo tools", async 
       "line-1"
     ],
     ["cart", "show", "--cart-uuid", "cart-1"],
-    [
-      "promo",
-      "apply",
-      "--cart-uuid",
-      "cart-1",
-      "--promo-code",
-      "SAVE",
-      "--campaign-id",
-      "campaign-1",
-      "--ad-group-id",
-      "group-1",
-      "--ad-id",
-      "ad-1"
-    ],
     [
       "order",
       "preview",
@@ -1223,10 +1146,10 @@ test("unknown mutation fields are rejected before the CLI", async () => {
     authInfo(store, token.token),
     "tools/call",
     {
-      name: "apply_promo",
+      name: "delete_cart",
       arguments: {
         cart_uuid: "cart-1",
-        promo_code: "SAVE",
+        confirmation: "DELETE CART",
         retry: true
       }
     }
@@ -2538,6 +2461,16 @@ test("add cart preserves successful items when checkout link creation fails", as
   const { mcpHandler } = createTestApp({
     securityStore: store,
     runCli: async (args) => {
+      if (args[0] === "store-details") {
+        return cliResult({
+          store: { store_id: "store-1", business_vertical_id: 1 }
+        });
+      }
+      if (args[0] === "item-details") {
+        return cliResult({
+          item: { item_id: "item-1", name: "Item", available: true }
+        });
+      }
       if (args[0] === "cart" && args[1] === "show") {
         return cliResult({
           cart_uuid: "cart-1",
@@ -2613,6 +2546,20 @@ test("unknown cart-write outcomes require inspection and never resend", async ()
     securityStore: store,
     runCli: async (args) => {
       calls.push(args);
+      if (args[0] === "store-details") {
+        return cliResult({
+          store: { store_id: "store-1", business_vertical_id: 1 }
+        });
+      }
+      if (args[0] === "item-details") {
+        return cliResult({
+          item: {
+            item_id: "retail-item-1",
+            name: "Sparkling Water",
+            available: true
+          }
+        });
+      }
       if (args[0] === "cart" && args[1] === "list") {
         return cliResult({ carts: [] });
       }
@@ -2663,6 +2610,8 @@ test("unknown cart-write outcomes require inspection and never resend", async ()
   assert.deepEqual(
     calls.map((args) => args.slice(0, 2)),
     [
+      ["store-details", "--store-id"],
+      ["item-details", "--store-id"],
       ["cart", "list"],
       ["cart", "add-items"]
     ]
@@ -2683,6 +2632,20 @@ test("add cart refuses to duplicate an active same-store cart", async () => {
     securityStore: store,
     runCli: async (args) => {
       calls.push(args);
+      if (args[0] === "store-details") {
+        return cliResult({
+          store: { store_id: "store-1", business_vertical_id: 1 }
+        });
+      }
+      if (args[0] === "item-details") {
+        return cliResult({
+          item: {
+            item_id: "item-1",
+            name: "Enchiladas Verdes",
+            available: true
+          }
+        });
+      }
       if (args[0] === "cart" && args[1] === "list") {
         return cliResult({
           carts: [
@@ -2741,7 +2704,11 @@ test("add cart refuses to duplicate an active same-store cart", async () => {
   );
   assert.deepEqual(
     calls.map((args) => args.slice(0, 2)),
-    [["cart", "list"]]
+    [
+      ["store-details", "--store-id"],
+      ["item-details", "--store-id"],
+      ["cart", "list"]
+    ]
   );
 
   await mcpHandler.close();
@@ -2759,6 +2726,16 @@ test("add cart safely reuses an empty active same-store cart", async () => {
     securityStore: store,
     runCli: async (args) => {
       calls.push(args);
+      if (args[0] === "store-details") {
+        return cliResult({
+          store: { store_id: "store-1", business_vertical_id: 1 }
+        });
+      }
+      if (args[0] === "item-details") {
+        return cliResult({
+          item: { item_id: "item-1", name: "Item", available: true }
+        });
+      }
       if (args[0] === "cart" && args[1] === "list") {
         return cliResult({
           carts: [
@@ -2847,6 +2824,16 @@ test("concurrent add_cart_items calls cannot duplicate one cart write", async ()
     securityStore: store,
     runCli: async (args) => {
       calls.push(args);
+      if (args[0] === "store-details") {
+        return cliResult({
+          store: { store_id: "store-1", business_vertical_id: 1 }
+        });
+      }
+      if (args[0] === "item-details") {
+        return cliResult({
+          item: { item_id: "item-1", name: "Item", available: true }
+        });
+      }
       if (args[0] === "cart" && args[1] === "list") {
         markFirstListStarted();
         await firstListGate;
@@ -3248,37 +3235,6 @@ test("discovery fails clearly without a usable default address", async () => {
     /did not identify a default saved address/
   );
   assert.deepEqual(calls, [["address", "list"]]);
-
-  await mcpHandler.close();
-  store.close();
-});
-
-test("raw runner and activity tools are not exposed", async () => {
-  const store = new SecurityStore({ databasePath: ":memory:" });
-  const token = store.createToken({
-    name: "Purchase",
-    allowPurchases: true
-  });
-  const { mcpHandler } = createTestApp({
-    securityStore: store,
-    runCli: async () => {
-      throw new Error("CLI should not run during tools/list.");
-    }
-  });
-
-  const response = await mcpRequest(
-    mcpHandler,
-    authInfo(store, token.token),
-    "tools/list",
-    {}
-  );
-  const toolNames = response.body.result.tools.map((tool) => tool.name);
-  assert.equal(toolNames.includes("run"), false);
-  assert.equal(toolNames.includes("activity"), false);
-  assert.equal(
-    toolNames.includes("get_restaurant_item_details"),
-    false
-  );
 
   await mcpHandler.close();
   store.close();

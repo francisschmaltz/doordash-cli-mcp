@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { createDoorDashApp } from "../src/app.js";
-import { SecurityStore } from "../src/security-store.js";
+import { MemorySecurityStore as SecurityStore } from "./helpers/memory-security-store.js";
 
 function cliResult(structuredContent) {
   return {
@@ -122,16 +122,6 @@ test("unknown mutation outcomes return one concrete inspection action", async (t
       },
       code: "CART_MUTATION_OUTCOME_UNKNOWN",
       recovery_tool: "show_cart",
-      recovery_arguments: { cart_uuid: "cart-1" }
-    },
-    {
-      name: "apply_promo",
-      args: {
-        cart_uuid: "cart-1",
-        promo_code: "DINNER"
-      },
-      code: "PROMO_MUTATION_OUTCOME_UNKNOWN",
-      recovery_tool: "create_checkout_link",
       recovery_arguments: { cart_uuid: "cart-1" }
     },
     {

@@ -2,7 +2,6 @@ import * as z from "zod/v4";
 
 import {
   addCartItemsArgs,
-  applyPromoArgs,
   buildGroceryListArgs,
   checkoutLinkArgs,
   deleteCartArgs,
@@ -11,10 +10,8 @@ import {
   listCartsArgs,
   listOrdersArgs,
   listPaymentMethodsArgs,
-  listPromosArgs,
   orderStatusArgs,
   receiptArgs,
-  removePromoArgs,
   searchRestaurantsArgs,
   setAddressArgs,
   showCartArgs,
@@ -47,10 +44,6 @@ const legacyInputAliases = [
   ["replacement_cart_item_id", ["replacementCartItemId"]],
   ["confirm_delete_without_replacement", ["confirmDeleteWithoutReplacement"]],
   ["order_uuid", ["orderUuid"]],
-  ["promo_code", ["promoCode"]],
-  ["campaign_id", ["campaignId"]],
-  ["ad_group_id", ["adGroupId"]],
-  ["ad_id", ["adId"]],
   ["scheduled_time", ["scheduledTime"]],
   ["budget_id", ["budgetId", "selected_budget_id", "selectedBudgetId"]],
   ["team_id", ["teamId"]],
@@ -81,10 +74,6 @@ const internalInputNames = [
   ["replacement_cart_item_id", "replacementCartItemId"],
   ["confirm_delete_without_replacement", "confirmDeleteWithoutReplacement"],
   ["order_uuid", "orderUuid"],
-  ["promo_code", "promoCode"],
-  ["campaign_id", "campaignId"],
-  ["ad_group_id", "adGroupId"],
-  ["ad_id", "adId"],
   ["scheduled_time", "scheduledTime"],
   ["budget_id", "budgetId"],
   ["team_id", "teamId"],
@@ -309,24 +298,6 @@ const previewOptionsSchema = {
   apply_credits: z.boolean().default(true)
 };
 
-const promoInputSchema = {
-  cart_uuid: idSchema.describe("Copy cart_uuid from a cart response."),
-  promo_code: z
-    .string()
-    .min(1)
-    .max(200)
-    .describe("Copy promo_code from list_promos or the user."),
-  campaign_id: idSchema
-    .optional()
-    .describe("Copy campaign_id from the same list_promos entry."),
-  ad_group_id: idSchema
-    .optional()
-    .describe("Copy ad_group_id from the same list_promos entry."),
-  ad_id: idSchema
-    .optional()
-    .describe("Copy ad_id from the same list_promos entry.")
-};
-
 const workBudgetConfirmationSchema = z.strictObject({
   type: z.literal("work_budget"),
   name: z
@@ -488,6 +459,23 @@ function register(server, name, config, handler) {
 export function registerDoorDashTools(server, context) {
   register(
     server,
+    "doordash_auth",
+    {
+      title: "DoorDash Authentication",
+      description:
+        "Check DoorDash sign-in, or validate and save a replacement access token during this conversation. If sign-in expired, ask the user to run dd-cli export-token on a computer with a browser and provide the token. Never invent a token or include it in intent, summaries, or other tool arguments. After renewal, inspect any write already attempted before continuing; never resubmit a recorded order attempt.",
+      inputSchema: canonicalObject({
+        access_token: z.string().min(1).max(65_536).optional().describe(
+          "Access token supplied by the user from dd-cli export-token. Omit to check status."
+        )
+      }),
+      annotations: annotations({ readOnly: false, idempotent: true })
+    },
+    async (input) => context.doordashAuth(input)
+  );
+
+  register(
+    server,
     "list_addresses",
     {
       title: "List DoorDash Addresses",
@@ -569,7 +557,7 @@ export function registerDoorDashTools(server, context) {
     {
       title: "Find DoorDash Grocery or Retail Products",
       description:
-        "Search a grocery or retail store. For restaurant food, use get_menu with store_id and a dish query.",
+        "Search a grocery or retail store. For restaurant food, use get_menu with store_id.",
       inputSchema: canonicalObject({
         store_id: idSchema.describe(
           "Copy a non-restaurant store_id from a store result."
@@ -637,18 +625,11 @@ export function registerDoorDashTools(server, context) {
     {
       title: "Get DoorDash Restaurant Menu",
       description:
-        "Return the complete restaurant menu for store_id, including its authoritative menu_id for item-detail and cart handoff. Use query to filter that menu to one dish. This makes exactly one read-only DoorDash menu call and never reads or changes cart state.",
+        "Return the complete restaurant menu for store_id, including its authoritative menu_id for item-detail and cart handoff. This makes exactly one read-only DoorDash menu call and never reads or changes cart state.",
       inputSchema: canonicalObject({
         store_id: idSchema.describe(
           "Copy store_id from search_restaurants or get_store_details."
-        ),
-        query: z
-          .string()
-          .trim()
-          .min(1)
-          .max(300)
-          .optional()
-          .describe("Optional dish-name filter, such as Spicy TanTan.")
+        )
       }),
       annotations: annotations({ readOnly: true })
     },
@@ -962,94 +943,6 @@ export function registerDoorDashTools(server, context) {
       context.invoke(
         orderStatusArgs({ orderUuid: orderUuidFromInput(input) })
       )
-  );
-
-  register(
-    server,
-    "list_promos",
-    {
-      title: "List DoorDash Promotions",
-      description:
-        "List consumer- and store-specific campaign promotions eligible at store_id.",
-      inputSchema: canonicalObject({
-        store_id: idSchema.describe(
-          "Copy store_id from a store, menu, or search result."
-        )
-      }),
-      annotations: annotations({ readOnly: true })
-    },
-    async (input) => context.invoke(listPromosArgs(input))
-  );
-
-  register(
-    server,
-    "apply_promo",
-    {
-      title: "Apply DoorDash Promotion",
-      description:
-        "Apply a typed or campaign promo to cart_uuid. Copy promo_code and campaign identifiers directly from list_promos.",
-      inputSchema: canonicalObject(promoInputSchema),
-      annotations: annotations({
-        readOnly: false,
-        idempotent: false
-      })
-    },
-    async (input) =>
-      context.invoke(applyPromoArgs(input), {
-        transform: (data) => ({
-          ...data,
-          cart_uuid: data?.cart_uuid || input.cartUuid,
-          promo_code: data?.promo_code || input.promoCode
-        }),
-        stateMutation: {
-          operation: "apply_promo",
-          cartUuid: input.cartUuid,
-          stateScope: "cart"
-        },
-        mutationOutcome: {
-          code: "PROMO_MUTATION_OUTCOME_UNKNOWN",
-          message:
-            "DoorDash did not confirm whether the promo was applied. Do not apply it again. Create the checkout link once and verify the promotion in DoorDash checkout.",
-          cartUuid: input.cartUuid,
-          stateScope: "cart"
-        }
-      })
-  );
-
-  register(
-    server,
-    "remove_promo",
-    {
-      title: "Remove DoorDash Promotion",
-      description:
-        "Remove a promo using the same promo_code and campaign IDs returned by list_promos and used when it was applied.",
-      inputSchema: canonicalObject(promoInputSchema),
-      annotations: annotations({
-        readOnly: false,
-        destructive: true,
-        idempotent: false
-      })
-    },
-    async (input) =>
-      context.invoke(removePromoArgs(input), {
-        transform: (data) => ({
-          ...data,
-          cart_uuid: data?.cart_uuid || input.cartUuid,
-          promo_code: data?.promo_code || input.promoCode
-        }),
-        stateMutation: {
-          operation: "remove_promo",
-          cartUuid: input.cartUuid,
-          stateScope: "cart"
-        },
-        mutationOutcome: {
-          code: "PROMO_MUTATION_OUTCOME_UNKNOWN",
-          message:
-            "DoorDash did not confirm whether the promo was removed. Do not remove it again. Create the checkout link once and verify the promotion in DoorDash checkout.",
-          cartUuid: input.cartUuid,
-          stateScope: "cart"
-        }
-      })
   );
 
   if (hasPurchaseAccess(context.authInfo)) {

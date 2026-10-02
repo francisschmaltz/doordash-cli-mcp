@@ -20,13 +20,9 @@ test("typed CLI commands resolve to their advertised response families", () => {
     contractForCommand(["order", "preview", "--cart-uuid", "cart-1"]),
     contracts.orderPreview
   );
-  assert.equal(
-    contractForCommand(["promo", "apply", "--cart-uuid", "cart-1"]),
-    contracts.promotionMutation
-  );
-  assert.equal(
-    contractForCommand(["future-safe-command"]),
-    contracts.rawCli
+  assert.throws(
+    () => contractForCommand(["future-safe-command"]),
+    /No response contract/
   );
 });
 

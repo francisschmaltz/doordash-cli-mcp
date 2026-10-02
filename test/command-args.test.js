@@ -104,6 +104,7 @@ test("builds nested additive cart arguments", () => {
           item_id: "item-1",
           item_name: "Combo",
           quantity: 2,
+          default_handling: "exact",
           nested_options: [
             {
               id: "protein-1",

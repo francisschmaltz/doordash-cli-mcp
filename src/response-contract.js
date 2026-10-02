@@ -7,17 +7,6 @@ const optionalString = z.string().optional();
 const optionalNumber = z.number().finite().optional();
 const optionalBoolean = z.boolean().optional();
 
-const jsonValueSchema = z.lazy(() =>
-  z.union([
-    z.string(),
-    z.number(),
-    z.boolean(),
-    z.null(),
-    z.array(jsonValueSchema),
-    z.record(z.string(), jsonValueSchema)
-  ])
-);
-
 export const moneySchema = z.number().finite();
 
 const locationSchema = z.object({
@@ -1315,7 +1304,7 @@ function normalizePricing(value, { tipCents } = {}) {
   );
   const discountSourceLines = lines.filter((line) =>
     !creditSourceLines.includes(line) &&
-    /discount|saving|promo/i.test(`${line._match || ""} ${line.label || ""}`)
+    /discount|saving/i.test(`${line._match || ""} ${line.label || ""}`)
   );
   const feeSourceLines = lines.filter(
     (line) =>
@@ -1759,6 +1748,85 @@ function normalizeOrder(value, options = {}) {
   ]);
 }
 
+const CREATED_ORDER_STATUSES = new Set([
+  "successful",
+  "placed",
+  "scheduled",
+  "store_confirmed",
+  "ready_for_pickup",
+  "dasher_assigned",
+  "dasher_at_store",
+  "picked_up",
+  "dasher_nearby",
+  "completed",
+  "cancelled"
+]);
+
+const TERMINAL_ORDER_STATUSES = new Set([
+  "successful",
+  "action_required",
+  "failed",
+  "not_found",
+  "order_declined",
+  "completed",
+  "cancelled"
+]);
+
+export function normalizeOrderStatusData(value) {
+  const source = asObject(value);
+  if (!source) {
+    return undefined;
+  }
+  // The CLI has returned flat results, result/order wrappers, and an
+  // order_status object across its releases. Retain root IDs and links.
+  const result = asObject(source.result) || {};
+  const order = asObject(result.order) || asObject(source.order) || {};
+  const details =
+    asObject(order.order_status) ||
+    asObject(result.order_status) ||
+    asObject(source.order_status) ||
+    {};
+  const flattened = { ...source, ...result, ...order, ...details };
+  const notFound = source.success === true && source.result === null;
+  const status = stringValue(
+    details.status,
+    details.order_status,
+    order.status,
+    order.order_status,
+    result.status,
+    result.order_status,
+    source.status,
+    source.order_status
+  );
+  const windowStart = isoTimestamp(flattened.delivery_window_start);
+  const windowEnd = isoTimestamp(flattened.delivery_window_end);
+  const eta = windowStart
+    ? `${windowStart}${windowEnd ? ` – ${windowEnd}` : ""}`
+    : isoTimestamp(first(flattened.estimated_pickup_time, flattened.quoted_delivery_time));
+  const pickup = booleanValue(flattened.is_pickup);
+  return {
+    ...flattened,
+    status: notFound ? "not_found" : status?.toLowerCase(),
+    ...(pickup !== undefined && !flattened.fulfillment
+      ? { fulfillment: pickup ? "pickup" : "delivery" }
+      : {}),
+    ...(eta && !flattened.delivery_time ? { delivery_time: eta } : {})
+  };
+}
+
+export function classifyOrderStatus(value) {
+  const status =
+    typeof value === "string"
+      ? value.trim().toLowerCase()
+      : normalizeOrderStatusData(value)?.status;
+  return {
+    status,
+    created: CREATED_ORDER_STATUSES.has(status),
+    terminal: TERMINAL_ORDER_STATUSES.has(status),
+    failed: ["failed", "not_found", "order_declined", "cancelled"].includes(status)
+  };
+}
+
 export class UpstreamSchemaError extends Error {
   constructor(message) {
     super(message);
@@ -1925,12 +1993,6 @@ function menuProject(data) {
   const warnings = warningList(source.warning);
   if (items.length !== normalizedItems.length) {
     warnings.push("Menu items without item_id or name were omitted.");
-  }
-  const appliedQuery = stringValue(source.mcp_query);
-  if (items.length === 0 && appliedQuery) {
-    warnings.push(
-      `No menu items matched query "${appliedQuery}". Do not repeat it unchanged; try one broader dish name or call get_menu once without query.`
-    );
   }
   if (!menuId) {
     throw new UpstreamSchemaError(
@@ -2132,7 +2194,7 @@ function itemSearchProject(data) {
   }
   if (results.every((group) => group.items.length === 0)) {
     warnings.push(
-      "No grocery or retail products matched. If this is a restaurant, call get_menu with the same store_id and a dish-name query; do not retry find_items unchanged."
+      "No grocery or retail products matched. If this is a restaurant, call get_menu with the same store_id; do not retry find_items unchanged."
     );
   }
   return card(
@@ -2633,14 +2695,9 @@ function actionProject(kind, fallbackMessage) {
         ? compactRecord([
             ["address_id", idValue(source.address_id, source.id)]
           ])
-        : kind === "cart_mutation"
-          ? compactRecord([
-              ["cart_uuid", idValue(source.cart_uuid, source.id)]
-            ])
-          : compactRecord([
-              ["cart_uuid", idValue(source.cart_uuid)],
-              ["promo_code", stringValue(source.promo_code)]
-            ]);
+        : compactRecord([
+            ["cart_uuid", idValue(source.cart_uuid, source.id)]
+          ]);
     return card(
       kind,
       {
@@ -3002,16 +3059,13 @@ function reorderProject(data) {
 }
 
 function orderStatusProject(data) {
-  const source = asObject(data);
+  const source = normalizeOrderStatusData(data);
   if (!source) {
     throw new UpstreamSchemaError(
       "DoorDash returned an invalid order-status response."
     );
   }
-  const statusSource = asObject(source.result)
-    ? { ...source, ...source.result }
-    : source;
-  const order = normalizeOrder(statusSource);
+  const order = normalizeOrder(source, { status: source.status });
   if (!order.status) {
     throw new UpstreamSchemaError(
       "DoorDash order-status response did not contain a status."
@@ -3048,10 +3102,7 @@ function submittedOrderProject(data) {
       "DoorDash returned an invalid submitted-order response."
     );
   }
-  const rawFinalStatus = asObject(source.finalStatus) || {};
-  const finalStatus = asObject(rawFinalStatus.result)
-    ? { ...rawFinalStatus, ...rawFinalStatus.result }
-    : rawFinalStatus;
+  const finalStatus = normalizeOrderStatusData(source.finalStatus) || {};
   const order = normalizeOrder(
     { ...source.submitted, ...finalStatus },
     {
@@ -3070,6 +3121,24 @@ function submittedOrderProject(data) {
     order,
     warningList(source.warning)
   );
+}
+
+function credentialsProject(data) {
+  const source = asObject(data);
+  if (
+    !source ||
+    typeof source.configured !== "boolean" ||
+    typeof source.authenticated !== "boolean" ||
+    typeof source.message !== "string"
+  ) {
+    throw new UpstreamSchemaError("DoorDash returned an invalid authentication status.");
+  }
+  return card("credential_status", compactRecord([
+    ["configured", source.configured],
+    ["authenticated", source.authenticated],
+    ["expires_at", stringValue(source.expires_at)],
+    ["message", source.message]
+  ]));
 }
 
 function addressesProject(data) {
@@ -3136,49 +3205,6 @@ function paymentMethodsProject(data) {
   return card("payment_methods", { cards }, warnings);
 }
 
-function promosProject(data) {
-  const source = asObject(data);
-  const rawPromos = first(source?.promos, source?.promotions);
-  if (!source || !Array.isArray(rawPromos)) {
-    throw new UpstreamSchemaError(
-      "DoorDash returned an invalid promotions response."
-    );
-  }
-  assertObjectArray(rawPromos, "promotions response");
-  const normalizedPromotions = rawPromos.map((promo) =>
-    compactRecord([
-      ["promo_code", stringValue(promo.promo_code, promo.code)],
-      ["store_id", idValue(promo.store_id, source.store_id)],
-      ["title", stringValue(promo.title, promo.name)],
-      ["description", stringValue(promo.description, promo.subtitle)],
-      ["campaign_id", idValue(promo.campaign_id)],
-      ["ad_group_id", idValue(promo.ad_group_id)],
-      ["ad_id", idValue(promo.ad_id)],
-      ["discount", money(first(promo.discount, promo.discount_amount))]
-    ])
-  );
-  const promotions = normalizedPromotions.filter(
-    (promotion) => promotion.promo_code
-  );
-  const warnings = warningList(source.warning);
-  if (promotions.length !== normalizedPromotions.length) {
-    warnings.push("Promotions without promo_code were omitted.");
-  }
-  return card("promotion_list", { promotions }, warnings);
-}
-
-function activityProject(data) {
-  const source = asObject(data);
-  if (!source || !Array.isArray(source.entries)) {
-    throw new UpstreamSchemaError("DoorDash returned invalid activity data.");
-  }
-  return card("activity", { entries: source.entries });
-}
-
-function rawCliProject(data) {
-  return card("raw_cli", { result: data ?? null });
-}
-
 const categorySchema = z.object({
   category_id: optionalString,
   name: optionalString,
@@ -3225,17 +3251,6 @@ const cardPaymentSchema = z.object({
   is_default: optionalBoolean
 });
 
-const promotionSchema = z.object({
-  promo_code: z.string(),
-  store_id: optionalString,
-  title: optionalString,
-  description: optionalString,
-  campaign_id: optionalString,
-  ad_group_id: optionalString,
-  ad_id: optionalString,
-  discount: moneySchema.optional()
-});
-
 const tipSuggestionSchema = z.object({
   amount: moneySchema,
   percentage: optionalNumber,
@@ -3273,6 +3288,12 @@ const submitContextSchema = z.object({
 });
 
 const schemaByKind = {
+  credential_status: cardSchema("credential_status", {
+    configured: z.boolean(),
+    authenticated: z.boolean(),
+    expires_at: optionalString,
+    message: z.string()
+  }),
   address_list: cardSchema("address_list", {
     addresses: z.array(addressSchema)
   }),
@@ -3361,26 +3382,12 @@ const schemaByKind = {
     cart_uuid: z.string()
   }),
   order_status: cardSchema("order_status", orderFields),
-  promotion_list: cardSchema("promotion_list", {
-    promotions: z.array(promotionSchema)
-  }),
-  promotion_mutation: cardSchema("promotion_mutation", {
-    cart_uuid: z.string(),
-    promo_code: z.string(),
-    message: optionalString
-  }),
   payment_methods: cardSchema("payment_methods", {
     cards: z.array(cardPaymentSchema)
   }),
   order_submit: cardSchema("order_submit", {
     ...orderFields,
     items: z.array(itemSchema)
-  }),
-  activity: cardSchema("activity", {
-    entries: z.array(jsonValueSchema)
-  }),
-  raw_cli: cardSchema("raw_cli", {
-    result: jsonValueSchema
   })
 };
 
@@ -3488,13 +3495,6 @@ const publicPaymentCardSchema = z.looseObject({
   is_default: optionalBoolean
 });
 
-const publicPromotionSchema = z.looseObject({
-  promo_code: z.string(),
-  campaign_id: optionalString,
-  ad_group_id: optionalString,
-  ad_id: optionalString
-});
-
 const publicPricingSchema = z.looseObject({
   total_before_tip: optionalNumber,
   tip: optionalNumber,
@@ -3529,6 +3529,13 @@ const publicErrorSchema = z.looseObject({
 
 function publicSuccessFields(kind) {
   switch (kind) {
+    case "credential_status":
+      return {
+        configured: z.boolean(),
+        authenticated: z.boolean(),
+        expires_at: optionalString,
+        message: z.string()
+      };
     case "address_list":
       return { addresses: z.array(publicAddressSchema) };
     case "address_update":
@@ -3642,13 +3649,6 @@ function publicSuccessFields(kind) {
         order_uuid: optionalString,
         status: z.string()
       };
-    case "promotion_list":
-      return { promotions: z.array(publicPromotionSchema) };
-    case "promotion_mutation":
-      return {
-        cart_uuid: z.string(),
-        promo_code: z.string()
-      };
     case "payment_methods":
       return { cards: z.array(publicPaymentCardSchema) };
     case "order_submit":
@@ -3671,6 +3671,7 @@ function publicOutputSchema(kind) {
 }
 
 export const contracts = {
+  credentials: defineContract("credential_status", credentialsProject),
   addresses: defineContract("address_list", addressesProject),
   addressUpdate: defineContract(
     "address_update",
@@ -3694,20 +3695,13 @@ export const contracts = {
   receipt: defineContract("receipt", receiptProject),
   reorder: defineContract("reorder", reorderProject),
   orderStatus: defineContract("order_status", orderStatusProject),
-  promotionList: defineContract("promotion_list", promosProject),
-  promotionMutation: defineContract(
-    "promotion_mutation",
-    actionProject("promotion_mutation", "Promotion update")
-  ),
   paymentMethods: defineContract("payment_methods", paymentMethodsProject),
   orderSubmit: defineContract("order_submit", submittedOrderProject),
   orderSubmitAccepted: defineContract(
     "order_submit",
     submitAcceptedProject,
     cardSchema("order_submit", orderFields)
-  ),
-  activity: defineContract("activity", activityProject),
-  rawCli: defineContract("raw_cli", rawCliProject)
+  )
 };
 
 const orderHistoryRecoveryContract = defineContract(
@@ -3716,6 +3710,7 @@ const orderHistoryRecoveryContract = defineContract(
 );
 
 const toolContracts = {
+  doordash_auth: contracts.credentials,
   list_addresses: contracts.addresses,
   set_default_address: contracts.addressUpdate,
   build_grocery_list: contracts.groceryList,
@@ -3723,7 +3718,6 @@ const toolContracts = {
   find_nearby_stores: contracts.storeSearch,
   get_item_details: contracts.itemDetails,
   get_menu: contracts.menu,
-  get_restaurant_item_details: contracts.itemDetails,
   search_restaurants: contracts.storeSearch,
   get_store_details: contracts.storeDetails,
   add_cart_items: contracts.cart,
@@ -3737,13 +3731,8 @@ const toolContracts = {
   get_receipt: contracts.receipt,
   reorder: contracts.reorder,
   order_status: contracts.orderStatus,
-  list_promos: contracts.promotionList,
-  apply_promo: contracts.promotionMutation,
-  remove_promo: contracts.promotionMutation,
   list_payment_methods: contracts.paymentMethods,
-  order_submit: contracts.orderSubmit,
-  activity: contracts.activity,
-  run: contracts.rawCli
+  order_submit: contracts.orderSubmit
 };
 
 const commandContracts = new Map([
@@ -3768,15 +3757,16 @@ const commandContracts = new Map([
   ["order receipt", contracts.receipt],
   ["order reorder", contracts.reorder],
   ["order status", contracts.orderStatus],
-  ["promo list", contracts.promotionList],
-  ["promo apply", contracts.promotionMutation],
-  ["promo remove", contracts.promotionMutation],
   ["payment-method list", contracts.paymentMethods],
   ["order submit", contracts.orderSubmitAccepted]
 ]);
 
 export function contractForTool(name) {
-  return toolContracts[name] || contracts.rawCli;
+  const contract = toolContracts[name];
+  if (!contract) {
+    throw new Error(`No response contract is registered for MCP tool ${name}.`);
+  }
+  return contract;
 }
 
 export function publicOutputSchemaForTool(name) {
@@ -3785,11 +3775,13 @@ export function publicOutputSchemaForTool(name) {
 
 export function contractForCommand(args) {
   const command = args.slice(0, 2).join(" ");
-  return (
+  const contract =
     commandContracts.get(command) ||
-    commandContracts.get(args[0]) ||
-    contracts.rawCli
-  );
+    commandContracts.get(args[0]);
+  if (!contract) {
+    throw new Error(`No response contract is registered for CLI command ${command}.`);
+  }
+  return contract;
 }
 
 export function validateResponse(contract, value) {
@@ -3857,10 +3849,12 @@ function detailObject(error, ...names) {
 }
 
 function recoveryFor(error, code) {
+  if (error?.details?.requiresCredentialRenewal === true) {
+    return { tool: "doordash_auth", arguments: {} };
+  }
   const cartUuid = detailValue(error, "cart_uuid", "cartUuid");
   const orderUuid = detailValue(error, "order_uuid", "orderUuid");
   const storeId = detailValue(error, "store_id", "storeId");
-  const query = detailValue(error, "query");
   const stateScope = detailValue(error, "state_scope", "stateScope");
   const previewArguments = detailObject(
     error,
@@ -3868,6 +3862,8 @@ function recoveryFor(error, code) {
     "previewArguments"
   );
   switch (code) {
+    case "DOORDASH_AUTH_REQUIRED":
+      return { tool: "doordash_auth", arguments: {} };
     case "CHECKOUT_STATE_CHANGE_IN_PROGRESS":
       if (stateScope === "address") {
         return { tool: "list_addresses", arguments: {} };
@@ -3892,13 +3888,6 @@ function recoveryFor(error, code) {
     case "REORDER_HYDRATION_FAILED":
       return cartUuid
         ? { tool: "show_cart", arguments: { cart_uuid: cartUuid } }
-        : undefined;
-    case "PROMO_MUTATION_OUTCOME_UNKNOWN":
-      return cartUuid
-        ? {
-            tool: "create_checkout_link",
-            arguments: { cart_uuid: cartUuid }
-          }
         : undefined;
     case "PREVIEW_OUTCOME_UNKNOWN":
       return cartUuid
@@ -3958,10 +3947,10 @@ function recoveryFor(error, code) {
     case "DEFAULT_ADDRESS_COORDINATES_MISSING":
       return { tool: "list_addresses", arguments: {} };
     case "RESTAURANT_REQUIRES_MENU":
-      return storeId && query
+      return storeId
         ? {
             tool: "get_menu",
-            arguments: { store_id: storeId, query }
+            arguments: { store_id: storeId }
           }
         : undefined;
     case "AGENTIC_RESTRICTED_ITEM_NOT_ALLOWED":
@@ -4005,7 +3994,6 @@ export function projectWithContract(contract, data) {
       Array.isArray(cartSource?.items)
   );
   if (
-    contract.kind !== "raw_cli" &&
     source &&
     booleanValue(source.success) === false &&
     !isTypedPartialCart
@@ -4144,6 +4132,9 @@ function summarizeCartErrors(value) {
 
 export function summarizeResponse(value) {
   if (value.error) {
+    if (value.error.recovery_tool === "doordash_auth") {
+      return `${value.error.code}: ${value.error.message} Call doordash_auth with {} for login instructions. Ask the user for a replacement from dd-cli export-token, then call doordash_auth with access_token. Do not retry a mutation already attempted; inspect its outcome first.`;
+    }
     const next = value.error.recovery_tool
       ? ` Next: call ${value.error.recovery_tool} once with ${JSON.stringify(value.error.recovery_arguments || {})}.`
       : "";
@@ -4151,6 +4142,8 @@ export function summarizeResponse(value) {
   }
 
   switch (value.kind) {
+    case "credential_status":
+      return value.message;
     case "store_search":
       return `Found ${plural(value.stores.length, "DoorDash store")}.`;
     case "store_details":
@@ -4180,8 +4173,6 @@ export function summarizeResponse(value) {
       return value.message || "Default DoorDash address updated.";
     case "cart_mutation":
       return value.message || "DoorDash cart updated.";
-    case "promotion_mutation":
-      return value.message || "DoorDash promotion updated.";
     case "checkout_link":
       return `DoorDash checkout: ${value.checkout_url}`;
     case "order_list":
@@ -4214,12 +4205,6 @@ export function summarizeResponse(value) {
       return `${plural(value.addresses.length, "saved DoorDash address", "saved DoorDash addresses")}.`;
     case "payment_methods":
       return `${plural(value.cards.length, "masked DoorDash card")}.`;
-    case "promotion_list":
-      return `${plural(value.promotions.length, "eligible DoorDash promotion")}.`;
-    case "activity":
-      return `${plural(value.entries.length, "recent DoorDash MCP activity", "recent DoorDash MCP activities")}.`;
-    case "raw_cli":
-      return "DoorDash CLI command completed.";
     default:
       return "DoorDash request completed.";
   }

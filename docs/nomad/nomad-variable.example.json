@@ -1,0 +1,11 @@
+{
+  "Namespace": "default",
+  "Path": "nomad/jobs/doordash-cli-mcp",
+  "Items": {
+    "database_url": "postgres://doordash:REPLACE_WITH_URL_ENCODED_PASSWORD@postgres.example.com:5432/doordash",
+    "database_ssl": "true",
+    "database_ssl_reject_unauthorized": "true",
+    "admin_access_token": "REPLACE_WITH_AT_LEAST_32_RANDOM_BYTES",
+    "dd_cli_access_token": ""
+  }
+}

@@ -12,6 +12,15 @@ import {
 } from "../src/response-contract.js";
 
 const fixtures = new Map([
+  [
+    contracts.credentials,
+    {
+      configured: true,
+      authenticated: true,
+      expires_at: "2026-10-03T02:00:00.000Z",
+      message: "DoorDash authentication is valid."
+    }
+  ],
   [contracts.addresses, { addresses: [] }],
   [contracts.addressUpdate, { success: true, address_id: "address-1" }],
   [contracts.groceryList, { items: [] }],
@@ -81,11 +90,6 @@ const fixtures = new Map([
     }
   ],
   [contracts.orderStatus, { order_uuid: "order-1", status: "pending" }],
-  [contracts.promotionList, { promos: [] }],
-  [
-    contracts.promotionMutation,
-    { success: true, cart_uuid: "cart-1", promo_code: "SAVE" }
-  ],
   [contracts.paymentMethods, { cards: [] }],
   [
     contracts.orderSubmit,
@@ -112,9 +116,7 @@ const fixtures = new Map([
       }
     }
   ],
-  [contracts.orderSubmitAccepted, { order_uuid: "order-1" }],
-  [contracts.activity, { count: 0, entries: [] }],
-  [contracts.rawCli, { future_field: true }]
+  [contracts.orderSubmitAccepted, { order_uuid: "order-1" }]
 ]);
 
 test("every response contract validates its compact success response", () => {
@@ -145,9 +147,6 @@ test("every response contract validates its compact success response", () => {
 
 test("typed projections preserve semantic upstream failures before shape validation", () => {
   for (const contract of new Set(Object.values(contracts))) {
-    if (contract.kind === "raw_cli") {
-      continue;
-    }
     let error;
     try {
       projectWithContract(contract, {
@@ -168,18 +167,6 @@ test("typed projections preserve semantic upstream failures before shape validat
     assert.equal(failure.error.message, "Please try again.");
     assert.equal(failure.error.retryable, false);
   }
-});
-
-test("raw CLI projections do not reinterpret command-specific success fields", () => {
-  const projected = projectWithContract(contracts.rawCli, {
-    success: false,
-    message: "Command-owned result"
-  });
-
-  assert.deepEqual(projected.result, {
-    success: false,
-    message: "Command-owned result"
-  });
 });
 
 test("errors are readable and include JSON for clients that ignore structuredContent", () => {
@@ -208,7 +195,6 @@ test("mutation errors are non-retryable unless a contract explicitly says otherw
   for (const contract of [
     contracts.addressUpdate,
     contracts.cartMutation,
-    contracts.promotionMutation,
     contracts.reorder,
     contracts.orderSubmit
   ]) {

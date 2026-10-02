@@ -1,0 +1,12 @@
+# Build context allowlist: local credentials and vendor downloads never enter it.
+**
+!package.json
+!package-lock.json
+!src/
+!src/**
+!public/
+!public/**
+!migrations/
+!migrations/**
+!scripts/
+!scripts/**

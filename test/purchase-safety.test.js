@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { createDoorDashApp } from "../src/app.js";
-import { SecurityStore } from "../src/security-store.js";
+import { MemorySecurityStore as SecurityStore } from "./helpers/memory-security-store.js";
 
 function createTestApp(options) {
   return createDoorDashApp({
@@ -804,4 +804,54 @@ test("cart mutations cannot enter between submit revalidation and purchase", asy
   const submitted = await submitting;
   assert.equal(submitted.result.isError, undefined, JSON.stringify(submitted));
   assert.equal(submitted.result.structuredContent.order_uuid, "order-locked");
+});
+
+test("authentication recovery after an attempted submission never permits a second submit", async (t) => {
+  const store = new SecurityStore();
+  const auth = purchaseAuth(store);
+  const calls = [];
+  const { mcpHandler } = createTestApp({
+    securityStore: store,
+    runCli: async (args) => {
+      calls.push(args);
+      if (args[0] === "address") return cliResult({ addresses: [] });
+      if (args[1] === "preview") return cliResult(previewResult({ cartUuid: "cart-renewal" }));
+      if (args[1] === "submit") return cliResult({ success: false, error_reason: "TOKEN_EXPIRED", error_message: "Expired token" });
+      throw new Error(`Unexpected CLI call: ${args.join(" ")}`);
+    }
+  });
+  t.after(() => mcpHandler.close());
+  const preview = await mcpRequest(mcpHandler, auth, "preview_order", { cart_uuid: "cart-renewal" });
+  const input = personalSubmitArgs(preview.result.structuredContent.submit_context);
+  const attempted = await mcpRequest(mcpHandler, auth, "order_submit", input, 2);
+  assert.equal(attempted.result.structuredContent.error.code, "SUBMISSION_OUTCOME_UNKNOWN");
+  assert.equal(attempted.result.structuredContent.error.recovery_tool, "doordash_auth");
+  assert.match(attempted.result.content[0].text, /Ask the user/);
+  assert.equal(store.getSubmissionAttempt("cart-renewal").status, "unknown");
+  const renewal = await mcpRequest(mcpHandler, auth, "doordash_auth", { access_token: "renewed-fixture-token" }, 3);
+  assert.equal(renewal.result.structuredContent.authenticated, true);
+  const repeated = await mcpRequest(mcpHandler, auth, "order_submit", input, 4);
+  assert.equal(repeated.result.structuredContent.error.code, "SUBMISSION_ALREADY_ATTEMPTED");
+  assert.equal(commandCount(calls, "order", "submit"), 1);
+});
+
+test("v025 failed status lookup is reported as verification failure, not fabricated pending", async (t) => {
+  const store = new SecurityStore();
+  const auth = purchaseAuth(store);
+  const { mcpHandler } = createTestApp({
+    securityStore: store,
+    runCli: async (args) => {
+      if (args[1] === "preview") return cliResult(previewResult({ cartUuid: "cart-status-failed" }));
+      if (args[1] === "submit") return cliResult({ success: true, order_uuid: "order-status-failed" });
+      if (args[1] === "status") return cliResult({ success: false, result: null, message: "Status lookup failed" });
+      throw new Error(`Unexpected CLI call: ${args.join(" ")}`);
+    }
+  });
+  t.after(() => mcpHandler.close());
+  const preview = await mcpRequest(mcpHandler, auth, "preview_order", { cart_uuid: "cart-status-failed" });
+  const result = await mcpRequest(mcpHandler, auth, "order_submit", personalSubmitArgs(preview.result.structuredContent.submit_context), 2);
+  assert.equal(result.result.isError, undefined);
+  assert.match(result.result.structuredContent.warnings.join(" "), /status verification failed/);
+  assert.doesNotMatch(result.result.structuredContent.warnings.join(" "), /pending after five/);
+  assert.equal(store.getSubmissionAttempt("cart-status-failed").status, "accepted");
 });

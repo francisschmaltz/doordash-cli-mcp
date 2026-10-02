@@ -3,7 +3,7 @@ import { OAuthError, OAuthErrorCode } from "@modelcontextprotocol/server";
 export function createTokenVerifier(securityStore) {
   return {
     async verifyAccessToken(token) {
-      const record = securityStore.verifyToken(token);
+      const record = await securityStore.verifyToken(token);
       if (!record) {
         throw new OAuthError(OAuthErrorCode.InvalidToken, "Unknown or revoked MCP token.");
       }

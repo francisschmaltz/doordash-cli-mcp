@@ -1,8 +1,8 @@
 import { existsSync } from "node:fs";
-import path from "node:path";
 
 import { createDoorDashApp } from "./app.js";
 import { SecurityStore } from "./security-store.js";
+import { DoorDashCredentialManager } from "./doordash-credentials.js";
 
 if (existsSync(".env")) {
   process.loadEnvFile(".env");
@@ -13,9 +13,6 @@ const PORT = parsePort(process.env.PORT || "8787");
 const CLI_TIMEOUT_MS = parseTimeout(process.env.DD_CLI_TIMEOUT_MS || "120000");
 const ADMIN_ACCESS_TOKEN = parseAdminAccessToken(
   process.env.ADMIN_ACCESS_TOKEN
-);
-const DATABASE_PATH = path.resolve(
-  process.env.DD_MCP_DB_PATH || ".data/doordash-mcp.sqlite"
 );
 
 function parsePort(value) {
@@ -44,10 +41,19 @@ function parseAdminAccessToken(value) {
 }
 
 const securityStore = new SecurityStore({
-  databasePath: DATABASE_PATH
+  databaseUrl: process.env.DATABASE_URL,
+  databaseSsl: process.env.DATABASE_SSL,
+  databaseSslRejectUnauthorized: process.env.DATABASE_SSL_REJECT_UNAUTHORIZED
 });
+await securityStore.initialize();
+const credentialManager = new DoorDashCredentialManager({
+  securityStore,
+  timeoutMs: CLI_TIMEOUT_MS
+});
+await credentialManager.initialize();
 const { app, mcpHandler } = createDoorDashApp({
   securityStore,
+  credentialManager,
   adminAccessToken: ADMIN_ACCESS_TOKEN,
   cliTimeoutMs: CLI_TIMEOUT_MS
 });
@@ -62,7 +68,7 @@ async function shutdown(signal) {
   console.log(`Received ${signal}; shutting down.`);
   httpServer.close(async () => {
     await mcpHandler.close();
-    securityStore.close();
+    await securityStore.close();
     process.exit(0);
   });
 }

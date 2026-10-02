@@ -80,9 +80,6 @@ The wire contract has one value per fact:
 | `get_receipt` | `receipt` |
 | `reorder` | `reorder` |
 | `order_status` | `order_status` |
-| `list_promos` | `promotion_list` |
-| `apply_promo` | `promotion_mutation` |
-| `remove_promo` | `promotion_mutation` |
 | `list_payment_methods` | `payment_methods` |
 | `order_submit` | `order_submit` |
 
@@ -107,8 +104,6 @@ The wire contract has one value per fact:
 | `receipt` | Final order and pricing |
 | `reorder` | Hydrated new cart and any item, quantity, or modifier differences from the source order |
 | `order_status` | Current order status and any upstream tracking URL |
-| `promotion_list` | `promotions` |
-| `promotion_mutation` | Required `cart_uuid` and `promo_code`; optional `message` |
 | `payment_methods` | Masked `cards` |
 | `order_submit` | Confirmed items, pricing, tip, ETA, status, and upstream links |
 
@@ -157,12 +152,10 @@ The wire contract has one value per fact:
 `store_id` is rejected before any retail catalog call and directs the caller to
 `get_menu`; never retry `find_items` for that store.
 
-Use a canonical input such as
-`{"store_id":"928163","query":"Margherita Pizza"}`. The optional `query`
-filters the returned menu; it does not change DoorDash. `get_menu` takes only
-`store_id` plus that optional query. The response supplies the authoritative
-`menu_id` and effective menu context for the next call. The wrapper makes one
-read-only `dd-cli menu --store-id` call and never reads or changes cart state.
+Use the canonical input `{"store_id":"928163"}`. `get_menu` returns the
+complete menu and supplies its authoritative `menu_id` for the next call. The
+wrapper makes one read-only `dd-cli menu --store-id` call and never reads or
+changes cart state.
 If DoorDash cannot return that menu, the operation fails instead of fabricating
 a partial menu from order history.
 If the user already named exact options, `add_cart_items` can resolve them.
@@ -773,8 +766,8 @@ never safe to retry unchanged. When recovery is available,
 
 Unknown mutation outcomes use the same rule: inspect once with the returned
 tool. Cart mutations recover through `show_cart`, reorders through
-`list_carts`, address changes through `list_addresses`, promo changes through
-browser checkout, and mode-changing previews through `show_cart`.
+`list_carts`, address changes through `list_addresses`, and mode-changing
+previews through `show_cart`.
 
 ```json
 {

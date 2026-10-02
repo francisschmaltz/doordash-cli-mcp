@@ -1,22 +1,26 @@
 {
   "name": "doordash-cli-mcp",
-  "version": "0.5.3",
+  "version": "0.6.0",
   "private": true,
   "description": "Streamable HTTP MCP wrapper for DoorDash CLI",
   "type": "module",
   "engines": {
-    "node": ">=22"
+    "node": ">=24"
   },
   "scripts": {
     "start": "node src/server.js",
-    "test": "node --test",
-    "check": "node --check src/server.js && node --check src/app.js && node --check src/admin-auth.js && node --check src/tools.js && node --check src/auth.js && node --check src/security-store.js && node --check src/dd-cli.js && node --check src/response-contract.js && node --check src/modifier-resolution.js && node --check src/activity-log.js && node --check src/command-args.js && node --check public/app.js && node --check public/login.js"
+    "test": "node --test test/*.test.js",
+    "migrate": "node --env-file-if-exists=.env scripts/migrate.js",
+    "import:sqlite": "node --env-file-if-exists=.env scripts/import-sqlite.js",
+    "install:cli": "node scripts/install-cli.js",
+    "test:container": "node scripts/container-smoke.js",
+    "check": "node scripts/check.js"
   },
   "dependencies": {
     "@modelcontextprotocol/express": "2.0.0",
     "@modelcontextprotocol/node": "2.0.0",
     "@modelcontextprotocol/server": "2.0.0",
-    "better-sqlite3": "^13.0.2",
+    "pg": "^8.22.0",
     "express": "5.1.0",
     "zod": "4.4.3"
   }

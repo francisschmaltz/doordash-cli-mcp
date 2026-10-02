@@ -14,6 +14,18 @@ import {
 
 test("rejects login through MCP", () => {
   assert.throws(() => validateArguments(["login"]), /cannot run through MCP/);
+  assert.throws(() => validateArguments(["export-token"]), /cannot run through MCP/);
+});
+
+test("injects a command credential through the child environment without changing the parent", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "dd-cli-env-"));
+  const mockCli = path.join(directory, "mock-dd-cli");
+  await writeFile(mockCli, '#!/bin/sh\nprintf \'{"supplied":"%s"}\\n\' "$DD_CLI_ACCESS_TOKEN"\n', "utf8");
+  await chmod(mockCli, 0o755);
+  const original = process.env.DD_CLI_ACCESS_TOKEN;
+  const result = await runDoorDashCli(["cart", "list"], { cliPath: mockCli, accessToken: "test-child-token" });
+  assert.equal(result.data.supplied, "test-child-token");
+  assert.equal(process.env.DD_CLI_ACCESS_TOKEN, original);
 });
 
 test("blocks purchase commands by default", () => {

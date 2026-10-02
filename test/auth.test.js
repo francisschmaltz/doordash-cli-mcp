@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { createTokenVerifier } from "../src/auth.js";
-import { SecurityStore } from "../src/security-store.js";
+import { MemorySecurityStore as SecurityStore } from "./helpers/memory-security-store.js";
 
 test("bearer verifier returns current token scopes and rejects revoked tokens", async () => {
   const store = new SecurityStore({ databasePath: ":memory:" });

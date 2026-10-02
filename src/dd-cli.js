@@ -40,9 +40,9 @@ export function validateArguments(args) {
     }
   }
 
-  if (args[0] === "login") {
+  if (["login", "export-token"].includes(args[0])) {
     throw new DoorDashCliError(
-      "Login cannot run through MCP. Run `./dd-cli login` directly on the Mac first."
+      "Login cannot run through MCP. Run `dd-cli export-token` on a computer with a browser, then provide the token through doordash_auth."
     );
   }
 }
@@ -162,7 +162,12 @@ export function runDoorDashCli(args, options = {}) {
 
   return new Promise((resolve, reject) => {
     const child = spawn(cliPath, cliArgs, {
-      env: process.env,
+      env: {
+        ...process.env,
+        ...(options.accessToken !== undefined
+          ? { DD_CLI_ACCESS_TOKEN: options.accessToken }
+          : {})
+      },
       stdio: ["ignore", "pipe", "pipe"]
     });
 

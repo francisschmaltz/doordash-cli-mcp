@@ -1,46 +1,41 @@
 # DoorDash CLI MCP server
 
-Local Streamable HTTP MCP wrapper for DoorDash CLI. It lets an MCP client use
-DoorDash through the macOS CLI and the credentials in the user's Keychain.
+Streamable HTTP MCP wrapper for DoorDash CLI. It runs on macOS Apple Silicon
+or Linux amd64, with PostgreSQL storing MCP tokens, submission protection, and
+the shared DoorDash login credential.
 
-The server exposes the authenticated ordering services in DoorDash CLI v0.2.1.
-`login`, help, and version remain local CLI operations.
+The server exposes the authenticated ordering services in DoorDash CLI v0.2.5.
+`login`, `export-token`, help, and version remain local CLI operations; the
+`doordash_auth` MCP tool accepts exported credentials without a restart.
+
+The Linux image and [Nomad deployment instructions](docs/nomad/README.md) run
+the service without macOS or a keyring.
 
 ## Setup
 
 Requirements:
 
-- macOS on Apple Silicon
-- Node.js 22 or newer
-- DoorDash CLI v0.2.1 for Darwin ARM64
+- macOS on Apple Silicon or Linux amd64
+- Node.js 24 or newer
+- PostgreSQL (17 is used in CI)
+- DoorDash CLI v0.2.5 for the current platform
 
-The DoorDash release is local vendor material and is not committed. Copy the
-extracted release into `./doordash-cli/`, then point the tracked root shim at
-its executable:
-
-```bash
-mkdir -p ./doordash-cli
-cp -R /path/to/extracted/doordash-cli-release/. ./doordash-cli/
-ln -sfn doordash-cli/dd-cli-v0.2.1-darwin-arm64 ./dd-cli
-chmod +x ./doordash-cli/dd-cli-v0.2.1-darwin-arm64
-```
-
-The executable must now be:
-
-```text
-./doordash-cli/dd-cli-v0.2.1-darwin-arm64
-```
-
-Sign in locally and install dependencies:
+Install dependencies and the checksum-verified CLI release. The installer
+preserves the full distribution, including Linux's `_internal` directory,
+under the ignored `./doordash-cli/` directory and updates `./dd-cli`:
 
 ```bash
-./dd-cli login
-npm install
+npm ci
+npm run install:cli
+./dd-cli --version
 cp .env.example .env
 ```
 
 Generate a secret with `openssl rand -hex 32`, paste it into
-`ADMIN_ACCESS_TOKEN` in `.env`, then start the server:
+`ADMIN_ACCESS_TOKEN` in `.env`, and set `DATABASE_URL` for the dedicated
+`doordash` database. See the [database setup and SQLite import](docs/nomad/README.md)
+before upgrading an existing installation. Start the server; migrations finish
+before it accepts traffic:
 
 ```bash
 npm start
@@ -57,7 +52,12 @@ The MCP endpoint is:
 http://127.0.0.1:8787/mcp
 ```
 
-All MCP requests require a valid bearer token.
+All MCP requests require a valid bearer token. Then run `./dd-cli export-token`
+on a machine with browser login and provide the exported token through
+`doordash_auth({"access_token":"EXPORTED_TOKEN"})`. Alternatively, set
+`DD_CLI_ACCESS_TOKEN` in `.env` before first boot to seed an empty credential
+store. Later replacements through MCP are saved in PostgreSQL and survive
+restarts.
 
 ### Open WebUI in Docker
 
@@ -126,7 +126,7 @@ client-compatible channels:
 - `structuredContent` is the stable, versioned machine result.
 
 The advertised output schemas are intentionally shallow: they name the fields
-needed for the next tool without repeating the full response grammar 25 times.
+needed for the next tool without repeating the full response grammar for every tool.
 Every actual response is still checked against the strict internal contract
 before it is returned.
 
@@ -136,7 +136,7 @@ when recovery is possible, the exact `recovery_tool` and
 `recovery_arguments`. Do not repeat the failed call; perform the one stated
 recovery action instead.
 
-State-changing tools are serialized inside the service. A cart, promo, address,
+State-changing tools are serialized inside the service. A cart, address,
 preview, reorder, or submission cannot slip between purchase revalidation and
 the purchase command. If a non-idempotent command loses its upstream result,
 the error names one inspection tool; it never tells the caller to repeat the
@@ -167,6 +167,22 @@ Typed tools discard unknown CLI response fields instead of leaking the upstream
 payload. See [MCP response examples](docs/mcp-response-examples.md) for complete
 wire examples.
 
+### Authentication
+
+- `doordash_auth`
+
+Call without arguments for login status and renewal instructions. Provide
+`access_token` to validate a replacement through a read-only CLI command, save
+it, and use it immediately. An invalid replacement leaves the stored credential
+intact. Any active MCP bearer can renew the shared account credential; checkout
+permission remains separately gated.
+
+The exported token expires and contains no refresh credential. Missing or
+expired login produces an MCP error directing the assistant to request a new
+exported token and call `doordash_auth`. Recovery does not need a Nomad Variable
+change, an admin UI visit, or a restart. Follow the returned inspection action
+for any earlier cart/order mutation; renewing login does not authorize a retry.
+
 ### Addresses
 
 - `list_addresses`
@@ -195,25 +211,22 @@ use the coordinates of the account-wide default address. They do not accept a
 location override. The wrapper returns an error instead of guessing when
 DoorDash has no marked default or the default has no coordinates.
 
-`get_menu` requires `store_id`. It returns the authoritative `menu_id` as
-output for later item-detail and cart calls. Its optional `query` filters a
-restaurant menu to the requested dish name. The wrapper makes exactly one
-read-only `dd-cli menu --store-id` call and never reads or changes cart state.
+`get_menu` requires `store_id`. It returns the complete restaurant menu and its
+authoritative `menu_id` for later item-detail and cart calls. The wrapper makes
+exactly one read-only `dd-cli menu --store-id` call and never reads or changes
+cart state.
 If DoorDash cannot return that menu, the operation fails instead of fabricating
 a partial menu from order history.
 `get_item_details` routes `i_`-prefixed IDs, plus bare historical item IDs
 paired with a restaurant `menu_id`, through the restaurant modifier endpoint.
-For an `i_` ID with no returned menu ID, the wrapper uses `store_id` as the
-endpoint's internal lookup context but does not publish it as `menu_id`; cart
-calls still require an authoritative menu ID. Other item IDs use grocery or
-retail details. On a large modifier tree, pass
+For an `i_` ID without `menu_id`, the wrapper follows the CLI's documented
+chain: call `menu --store-id`, copy its authoritative `menu_id`, then call
+`restaurant-item-details`. It never substitutes `store_id` for `menu_id`.
+Other item IDs use grocery or retail details. On a large modifier tree, pass
 `option_queries` such as `["Ranch"]` to receive root choices plus compact
 matching paths instead of dumping the entire tree.
 When the full-menu endpoint succeeds, `get_menu` returns every valid item and
-category supplied by DoorDash, without modifier trees. A zero-match query on
-that successful menu says not to repeat it unchanged: try one broader dish
-name or inspect the full menu once without a query. That broader-search advice
-does not apply when the menu call fails upstream.
+category supplied by DoorDash, without modifier trees.
 
 ### Carts
 
@@ -226,10 +239,11 @@ does not apply when the menu call fails upstream.
 The add operation is additive and non-idempotent. Send the complete requested
 batch once. Every line requires the exact menu `item_id` and exact menu `name`;
 names are labels, not customization. Before one DoorDash cart write, the
-wrapper fetches current details for every restaurant item, including bare
-historical IDs paired with a restaurant `menu_id`, and validates the full
-batch. A required group with one possible choice is selected automatically. A
-preference with multiple choices is never guessed.
+wrapper fetches current details for every item and validates its ID, name,
+availability, and required choices. Bare historical restaurant IDs are routed
+with the supplied restaurant `menu_id`. A required group with one possible
+choice is selected automatically. A preference with multiple choices is never
+guessed.
 
 Put requested choices per line in structured `requested_options` entries:
 `{"name":"Ranch","quantity":2,"option_id":"o_ranch_sauce"}`. `name` is
@@ -254,6 +268,8 @@ Exact choices may instead be copied into `nested_options` as
 such as `e_...`.
 Ordinary selections stay flat. If a selected option exposes another modifier
 group, put the child selections in that option's `options` array.
+The wrapper uses `default_handling: "exact"` so CLI defaults do not add
+modifiers the caller did not select.
 
 If preflight returns `items: []` plus `item_errors`, no cart change occurred.
 Resolve every reported line from the user's stated choices, or ask the user.
@@ -374,12 +390,9 @@ Use `account_default` only when that call cannot identify the default, browser
 checkout was offered, and the user explicitly accepts the unseen account
 default.
 
-### Payments and promotions
+### Payments
 
 - `list_payment_methods` — permission-gated
-- `list_promos`
-- `apply_promo`
-- `remove_promo`
 
 Every CLI invocation automatically uses root `--json-output` and appends:
 
@@ -389,7 +402,7 @@ Every CLI invocation automatically uses root `--json-output` and appends:
 
 ## CLI limitations
 
-DoorDash CLI v0.2.1 does not support:
+The current MCP tool set does not support:
 
 - Adding or changing saved payment methods
 - Per-cart delivery addresses
@@ -402,19 +415,15 @@ Browser checkout is the fallback for those cases.
 
 ## Storage and activity
 
-SQLite is used only for bearer-token hashes and the duplicate-submission
-ledger:
-
-```text
-./.data/doordash-mcp.sqlite
-```
-
-The directory is ignored by Git. DoorDash owns carts and orders; the macOS
-Keychain owns CLI credentials.
+PostgreSQL stores bearer-token hashes, per-token purchase permissions, the
+duplicate-submission ledger, and the shared DoorDash access token. The
+environment bootstrap credential never overwrites a credential already stored
+there. DoorDash owns carts and orders. See the [one-time SQLite import](docs/nomad/README.md)
+to preserve existing bearer tokens and submission history.
 
 The dashboard keeps the last 100 MCP-routed CLI calls in memory.
-Commands and CLI results are stored raw and completely unredacted, including
-coordinates, addresses, URLs, payment metadata, and error details. Anyone with
+Commands and CLI results include coordinates, addresses, URLs, payment
+metadata, and error details; login credentials are excluded. Anyone with
 admin dashboard or raw activity-log access can read them. The log resets on
 restart. Direct terminal calls do not appear.
 
@@ -433,4 +442,33 @@ http://127.0.0.1:8787/activity
 | `ADMIN_ACCESS_TOKEN` | required | Admin UI and API secret; minimum 16 characters |
 | `DD_CLI_PATH` | `./dd-cli` | DoorDash executable |
 | `DD_CLI_TIMEOUT_MS` | `120000` | Per-command timeout |
-| `DD_MCP_DB_PATH` | `./.data/doordash-mcp.sqlite` | Token and submission SQLite database |
+| `DATABASE_URL` | required | PostgreSQL connection URL |
+| `DATABASE_SSL` | `false` | Enable TLS for PostgreSQL |
+| `DATABASE_SSL_REJECT_UNAUTHORIZED` | `true` | Validate PostgreSQL certificates; `false` allows a private self-signed certificate |
+| `DD_CLI_ACCESS_TOKEN` | unset | Bootstrap an empty credential store; existing stored credentials take precedence |
+
+`/health/live` reports process liveness. `/health/ready` verifies PostgreSQL
+and returns 503 during database outages. DoorDash login expiry does not change
+health checks, leaving MCP authentication recovery reachable.
+
+## Container and verification
+
+```bash
+npm run check
+npm test
+# Alternatively, include integration tests against a dedicated test database:
+TEST_DATABASE_URL=postgres://doordash:TEST_PASSWORD@localhost:5432/doordash_test npm test
+# Optional local container smoke check:
+docker build --platform linux/amd64 --tag doordash-cli-mcp:test .
+npm run test:container
+```
+
+The optional container smoke test creates its own temporary PostgreSQL container and
+network, verifies the bundled CLI and HTTP/MCP server, and removes those test
+resources afterward. It does not connect to DoorDash or a live database.
+GitHub uses one workflow and one syntax/test job, including PostgreSQL integration,
+for pull requests and pushes to `main`. Docs-only changes skip CI. After checks
+pass on `main`, it builds one cached Linux amd64 image and publishes `latest`
+and `sha-FULL_COMMIT_SHA` tags. Container smoke checks are manual. Deployment
+commands remain manual in the
+[Nomad guide](docs/nomad/README.md).

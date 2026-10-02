@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { createDoorDashApp } from "../src/app.js";
-import { SecurityStore } from "../src/security-store.js";
+import { MemorySecurityStore as SecurityStore } from "./helpers/memory-security-store.js";
 
 function createTestApp(options) {
   return createDoorDashApp({
@@ -373,6 +373,20 @@ test("cart add refuses a truncated active-cart list", async (t) => {
     securityStore: store,
     runCli: async (args) => {
       calls.push(args);
+      if (args[0] === "store-details") {
+        return cliResult({
+          store: { store_id: "store-chicken", business_vertical_id: 1 }
+        });
+      }
+      if (args[0] === "item-details") {
+        return cliResult({
+          item: {
+            item_id: "9459662774",
+            name: "Deluxe Chicken Meal",
+            available: true
+          }
+        });
+      }
       if (args[0] === "cart" && args[1] === "list") {
         return cliResult({ carts: [], truncated: true });
       }
@@ -410,6 +424,8 @@ test("cart add refuses a truncated active-cart list", async (t) => {
     false
   );
   assert.deepEqual(calls.map((args) => args.slice(0, 2)), [
+    ["store-details", "--store-id"],
+    ["item-details", "--store-id"],
     ["cart", "list"]
   ]);
 });
@@ -1155,7 +1171,7 @@ test("bare restaurant item ID with menu_id uses restaurant details", async (t) =
   ]);
 });
 
-test("restaurant item details never publishes store_id as menu_id", async (t) => {
+test("restaurant item details resolves menu_id through the documented menu chain", async (t) => {
   const store = new SecurityStore({ databasePath: ":memory:" });
   const auth = authInfo(store);
   const calls = [];
@@ -1163,25 +1179,16 @@ test("restaurant item details never publishes store_id as menu_id", async (t) =>
     securityStore: store,
     runCli: async (args) => {
       calls.push(args);
-      if (args[0] === "store-details") {
+      if (args[0] === "menu") {
         return cliResult({
-          success: true,
-          store: {
-            store_id: "store-chicken",
-            name: "Example Chicken",
-            menu_id: ""
-          }
+          menu_id: "menu-authoritative",
+          store: { store_id: "store-chicken", name: "Example Chicken" },
+          items: [{ item_id: "i_9459662774", name: "Deluxe Chicken Meal" }]
         });
       }
       if (args[0] === "restaurant-item-details") {
         const details = ranchItemDetails();
-        details.menu_id = "store-chicken";
-        details.store = {
-          store_id: "store-chicken",
-          menu_id: "store-chicken"
-        };
         details.item.item_id = "i_9459662774";
-        details.item.menu_id = "store-chicken";
         return cliResult(details);
       }
       throw new Error(`Unexpected CLI call: ${args.join(" ")}`);
@@ -1196,26 +1203,23 @@ test("restaurant item details never publishes store_id as menu_id", async (t) =>
     name: "get_item_details",
     arguments: {
       store_id: "store-chicken",
-      menu_id: "store-chicken",
       item_id: "i_9459662774",
       option_queries: ["Ranch"]
     }
   });
 
   assert.equal(response.result.isError, undefined);
-  assert.equal(response.result.structuredContent.menu_id, undefined);
-  assert.equal(response.result.structuredContent.store.menu_id, undefined);
-  assert.equal(response.result.structuredContent.item.menu_id, undefined);
-  assert.match(
-    response.result.structuredContent.warnings.join(" "),
-    /returned store_id as menu_id/i
+  assert.equal(response.result.structuredContent.menu_id, "menu-authoritative");
+  assert.equal(
+    response.result.structuredContent.item.menu_id,
+    "menu-authoritative"
   );
   assert.equal(
     response.result.structuredContent.item.item_id,
     "i_9459662774"
   );
   assert.deepEqual(calls.map((args) => args[0]), [
-    "store-details",
+    "menu",
     "restaurant-item-details"
   ]);
   assert.deepEqual(calls[1], [
@@ -1223,7 +1227,7 @@ test("restaurant item details never publishes store_id as menu_id", async (t) =>
     "--store-id",
     "store-chicken",
     "--menu-id",
-    "store-chicken",
+    "menu-authoritative",
     "--item-id",
     "9459662774"
   ]);
@@ -1235,10 +1239,11 @@ test("restaurant item details preserves a menu_id returned by the item endpoint"
   const { mcpHandler } = createTestApp({
     securityStore: store,
     runCli: async (args) => {
-      if (args[0] === "store-details") {
+      if (args[0] === "menu") {
         return cliResult({
-          success: true,
-          store: { store_id: "store-chicken", menu_id: "" }
+          menu_id: "menu-from-menu",
+          store: { store_id: "store-chicken" },
+          items: [{ item_id: "i_9459662774", name: "Deluxe Chicken Meal" }]
         });
       }
       if (args[0] === "restaurant-item-details") {
@@ -1335,7 +1340,6 @@ test("get_menu rejects menu_id before the CLI", async (t) => {
     arguments: {
       store_id: "store-chicken",
       menu_id: "menu-chicken",
-      query: "Deluxe Chicken Meal"
     }
   });
 
@@ -1343,7 +1347,7 @@ test("get_menu rejects menu_id before the CLI", async (t) => {
   assert.equal(cliCalls, 0);
 });
 
-test("get_menu rejects a whitespace-only query before the CLI", async (t) => {
+test("get_menu rejects the removed query field before the CLI", async (t) => {
   const store = new SecurityStore({ databasePath: ":memory:" });
   const auth = authInfo(store);
   let cliCalls = 0;
@@ -1361,7 +1365,7 @@ test("get_menu rejects a whitespace-only query before the CLI", async (t) => {
 
   const response = await mcpRequest(mcpHandler, auth, {
     name: "get_menu",
-    arguments: { store_id: "store-chicken", query: "   " }
+    arguments: { store_id: "store-chicken", query: "Deluxe Chicken Meal" }
   });
 
   assert.equal(response.result.isError, true);
@@ -1413,15 +1417,12 @@ test("find_items rejects a restaurant before the retail catalog call", async (t)
   );
   assert.deepEqual(
     response.result.structuredContent.error.recovery_arguments,
-    {
-      store_id: "store-chicken",
-      query: "Chicken Sandwich Meal"
-    }
+    { store_id: "store-chicken" }
   );
   assert.deepEqual(calls.map((args) => args[0]), ["store-details"]);
 });
 
-test("find_items gives no unsafe recovery for multiple restaurant queries", async (t) => {
+test("find_items routes multiple restaurant queries to one complete menu", async (t) => {
   const store = new SecurityStore({ databasePath: ":memory:" });
   const auth = authInfo(store);
   const calls = [];
@@ -1457,15 +1458,15 @@ test("find_items gives no unsafe recovery for multiple restaurant queries", asyn
   assert.equal(response.result.isError, true);
   assert.equal(
     response.result.structuredContent.error.code,
-    "RESTAURANT_REQUIRES_SINGLE_MENU_QUERY"
+    "RESTAURANT_REQUIRES_MENU"
   );
   assert.equal(
     response.result.structuredContent.error.recovery_tool,
-    undefined
+    "get_menu"
   );
-  assert.match(
-    response.result.structuredContent.error.message,
-    /call get_menu once per dish.*2 queries/i
+  assert.deepEqual(
+    response.result.structuredContent.error.recovery_arguments,
+    { store_id: "store-chicken" }
   );
   assert.deepEqual(calls.map((args) => args[0]), ["store-details"]);
 });

@@ -8,7 +8,7 @@ import {
   contracts,
   projectWithContract
 } from "../src/response-contract.js";
-import { SecurityStore } from "../src/security-store.js";
+import { MemorySecurityStore as SecurityStore } from "./helpers/memory-security-store.js";
 
 function createTestApp(options) {
   return createDoorDashApp({
@@ -190,15 +190,15 @@ test("a later valid ETA range beats an earlier malformed alias", () => {
   assert.equal(projected.stores[0].delivery_time, "25-35 min");
 });
 
-test("a promotional credit appears once as credit, not also as a discount", () => {
+test("a credit appears once as credit, not also as a discount", () => {
   const projected = projectWithContract(contracts.receipt, {
     order_uuid: "order-1",
     items: [],
     total_before_tip: { unit_amount: 2000 },
     line_items: [
       {
-        charge_id: "PROMO_CREDIT",
-        label: "Promotional credit",
+        charge_id: "ACCOUNT_CREDIT",
+        label: "Account credit",
         final_money: { unit_amount: 500 }
       }
     ]

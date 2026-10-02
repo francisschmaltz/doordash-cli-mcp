@@ -32,9 +32,8 @@ function cartItemToCli(item) {
     item_id: item.itemId,
     item_name: item.itemName,
     quantity: item.quantity ?? 1,
-    ...(item.nestedOptions?.length
-      ? { nested_options: item.nestedOptions.map(nestedOptionToCli) }
-      : {})
+    default_handling: "exact",
+    nested_options: (item.nestedOptions || []).map(nestedOptionToCli)
   };
 }
 
@@ -250,37 +249,4 @@ export function submitOrderArgs({
 
 export function listPaymentMethodsArgs() {
   return ["payment-method", "list"];
-}
-
-export function listPromosArgs({ storeId }) {
-  return ["promo", "list", "--store-id", storeId];
-}
-
-function promoMutationArgs(command, {
-  cartUuid,
-  promoCode,
-  campaignId,
-  adGroupId,
-  adId
-}) {
-  const args = [
-    "promo",
-    command,
-    "--cart-uuid",
-    cartUuid,
-    "--promo-code",
-    promoCode
-  ];
-  option(args, "--campaign-id", campaignId);
-  option(args, "--ad-group-id", adGroupId);
-  option(args, "--ad-id", adId);
-  return args;
-}
-
-export function applyPromoArgs(input) {
-  return promoMutationArgs("apply", input);
-}
-
-export function removePromoArgs(input) {
-  return promoMutationArgs("remove", input);
 }

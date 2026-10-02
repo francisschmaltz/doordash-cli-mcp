@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url";
 import * as z from "zod/v4";
 
 import { ActivityLog } from "./activity-log.js";
+import { DoorDashCredentialManager, RENEWAL_INSTRUCTIONS } from "./doordash-credentials.js";
 import { createAdminAuth } from "./admin-auth.js";
 import { createTokenVerifier } from "./auth.js";
 import {
@@ -43,6 +44,8 @@ import {
 import {
   contractForCommand,
   contracts,
+  classifyOrderStatus,
+  normalizeOrderStatusData,
   errorEnvelope,
   normalizeModifierGroupsForResolution,
   projectWithContract,
@@ -58,13 +61,8 @@ const PUBLIC_DIR = path.resolve(SOURCE_DIR, "..", "public");
 const LOGIN_PATH = path.join(PUBLIC_DIR, "login.html");
 const LOGIN_SCRIPT_PATH = path.join(PUBLIC_DIR, "login.js");
 const STYLES_PATH = path.join(PUBLIC_DIR, "styles.css");
-const SERVER_VERSION = "0.5.3";
-const TERMINAL_ORDER_STATUSES = new Set([
-  "successful",
-  "action_required",
-  "failed",
-  "not_found"
-]);
+const SERVER_VERSION = "0.6.0";
+
 
 function safeErrorResult(error) {
   const details =
@@ -78,7 +76,14 @@ function safeErrorResult(error) {
 }
 
 function toolError(error, contract) {
+  if (error?.details?.requiresCredentialRenewal && error.details.code !== "DOORDASH_AUTH_REQUIRED") {
+    error = new DoorDashCliError(`${error.message} ${RENEWAL_INSTRUCTIONS}`, error.details);
+  }
   return toToolResult(errorEnvelope(contract, error), { isError: true });
+}
+
+function stoppedBeforeCredentialExecution(error) {
+  return error?.details?.code === "DOORDASH_AUTH_REQUIRED" && error.details.commandStarted === false;
 }
 
 function normalizedAddress(value) {
@@ -795,87 +800,8 @@ function reorderComparisonWarnings(sourceItems = [], cartItems = []) {
   return warnings;
 }
 
-function filterMenuByQuery(data, query) {
-  const normalizedQuery = normalizedChoiceText(query);
-  if (!normalizedQuery || !data || typeof data !== "object") {
-    return data;
-  }
-  const compactQuery = normalizedQuery.replace(/\s+/g, "");
-  const queryWordList = normalizedQuery.split(/\s+/);
-  const queryWords = new Set(queryWordList);
-  const matches = (item) => {
-    const normalizedName = normalizedChoiceText(
-      item?.name || item?.title || ""
-    );
-    const normalizedItem = normalizedChoiceText(
-      `${normalizedName} ${item?.description || ""}`
-    );
-    const compactName = normalizedName.replace(/\s+/g, "");
-    const itemWords = new Set(normalizedItem.split(/\s+/));
-    const nameWords = normalizedName.split(/\s+/).filter(Boolean);
-    const queryWordsInItem = queryWordList.every((word) =>
-      itemWords.has(word)
-    );
-    const queryContainsWholeName =
-      nameWords.length > 0 &&
-      nameWords.every((word) => queryWords.has(word));
-    const compactNameContainsQuery =
-      compactQuery.length >= 4 &&
-      compactName.includes(compactQuery);
-    const compactQueryContainsName =
-      compactName.length >= 4 &&
-      compactQuery.includes(compactName) &&
-      compactName.length / compactQuery.length >= 0.6;
-    return (
-      queryWordsInItem ||
-      compactNameContainsQuery ||
-      queryContainsWholeName ||
-      compactQueryContainsName
-    );
-  };
-  return {
-    ...data,
-    mcp_query: String(query).trim(),
-    items: Array.isArray(data.items)
-      ? data.items.filter(matches)
-      : Array.isArray(data.categories)
-        ? data.categories.flatMap((category) =>
-            Array.isArray(category?.items)
-              ? category.items.filter(matches)
-              : []
-          )
-        : [],
-    ...(Array.isArray(data.categories)
-      ? {
-          categories: data.categories
-            .map((category) => ({
-              ...category,
-              ...(Array.isArray(category?.items)
-                ? { items: category.items.filter(matches) }
-                : {})
-            }))
-            .filter(
-              (category) =>
-                !Array.isArray(category.items) || category.items.length > 0
-            )
-        }
-      : {})
-  };
-}
-
 function statusValue(statusResult) {
-  const status = (
-    statusResult?.status ||
-    statusResult?.order_status ||
-    statusResult?.order?.status ||
-    statusResult?.order?.order_status ||
-    statusResult?.result?.status ||
-    statusResult?.result?.order_status ||
-    statusResult?.result?.order?.status ||
-    statusResult?.result?.order?.order_status ||
-    null
-  );
-  return status ? String(status).toLowerCase() : null;
+  return normalizeOrderStatusData(statusResult)?.status || null;
 }
 
 function orderUuidFromSubmit(submitResult) {
@@ -911,8 +837,8 @@ function applySecurityHeaders(_req, res, next) {
   next();
 }
 
-function assertCurrentPurchaseAccess(securityStore, authInfo) {
-  const current = securityStore.verifyToken(authInfo?.token);
+async function assertCurrentPurchaseAccess(securityStore, authInfo) {
+  const current = await securityStore.verifyToken(authInfo?.token);
   if (!current?.allowPurchases) {
     throw new DoorDashCliError(
       "This bearer token does not allow checkout or card details. Enable its checkbox in the local UI."
@@ -1066,6 +992,7 @@ export function createDoorDashApp({
   adminAccessToken,
   cliTimeoutMs = 120_000,
   runCli = runDoorDashCli,
+  credentialManager,
   activityLog = new ActivityLog({ capacity: 100 }),
   startedAt = new Date(),
   pollDelay = (milliseconds) =>
@@ -1074,6 +1001,11 @@ export function createDoorDashApp({
   if (!securityStore) {
     throw new Error("createDoorDashApp requires securityStore.");
   }
+  const credentials = credentialManager || new DoorDashCredentialManager({
+    securityStore,
+    runCli,
+    timeoutMs: cliTimeoutMs
+  });
   const previewSigningKey = createHash("sha256")
     .update(`doordash-mcp-preview-v1:${adminAccessToken}`, "utf8")
     .digest();
@@ -1222,7 +1154,7 @@ export function createDoorDashApp({
     let data;
 
     try {
-      const execution = await runCli(args, {
+      const execution = await credentials.run(args, {
         allowPurchases,
         timeoutMs: cliTimeoutMs
       });
@@ -1310,6 +1242,7 @@ export function createDoorDashApp({
             code: "ACTIVE_CART_STATE_UNKNOWN",
             cartUuid: reference.cart_uuid,
             storeId,
+            requiresCredentialRenewal: error?.details?.requiresCredentialRenewal === true,
             cause: error instanceof Error ? error.message : String(error)
           }
         );
@@ -1324,7 +1257,7 @@ export function createDoorDashApp({
     let stateChangeToken;
     try {
       if (options.requiresPurchaseAccess) {
-        assertCurrentPurchaseAccess(securityStore, authInfo);
+        await assertCurrentPurchaseAccess(securityStore, authInfo);
       }
       if (options.stateMutation) {
         stateChangeToken = acquireCheckoutStateChange(
@@ -1345,7 +1278,8 @@ export function createDoorDashApp({
       if (
         options.mutationOutcome &&
         !isLockConflict &&
-        !isConfirmedFailure
+        !isConfirmedFailure &&
+        !stoppedBeforeCredentialExecution(error)
       ) {
         const outcome = options.mutationOutcome;
         return toolError(
@@ -1354,6 +1288,7 @@ export function createDoorDashApp({
             cartUuid: outcome.cartUuid,
             addressId: outcome.addressId,
             stateScope: outcome.stateScope,
+            requiresCredentialRenewal: error?.details?.requiresCredentialRenewal === true,
             cause: error instanceof Error ? error.message : String(error)
           }),
           contract
@@ -1407,32 +1342,15 @@ export function createDoorDashApp({
       };
     }
 
-    let storeDetails;
-    try {
-      storeDetails = await executeCli(
-        storeDetailsArgs({ storeId: input.storeId }),
-        { project: (data) => data }
-      );
-    } catch {
-      // Restaurant item details accepts store_id as its menu context.
-    }
-    const storeMenuId =
-      storeDetails?.success === false || storeDetails?.success === "false"
-        ? undefined
-        : authoritativeMenuIdForStore(
-            input.storeId,
-            returnedRestaurantMenuId(storeDetails)
-          );
-    if (storeMenuId) {
-      rememberMenuId(input.storeId, storeMenuId);
-      return {
-        lookupMenuId: storeMenuId,
-        authoritativeMenuId: storeMenuId
-      };
-    }
+    const projectedMenu = await executeCli(
+      menuArgs({ storeId: input.storeId }),
+      { project: (data) => projectWithContract(contracts.menu, data) }
+    );
+    const menu = sanitizeProjectedMenu(projectedMenu, input.storeId);
+    rememberProjectedMenuIds(menu);
     return {
-      lookupMenuId: input.storeId,
-      authoritativeMenuId: undefined
+      lookupMenuId: menu.menu_id,
+      authoritativeMenuId: menu.menu_id
     };
   }
 
@@ -1448,26 +1366,12 @@ export function createDoorDashApp({
         // Let the catalog endpoint handle stores whose vertical is unknown.
       }
       if (rawStoreIsRestaurant(storeDetails)) {
-        if (input.queries.length !== 1) {
-          return toolError(
-            new DoorDashCliError(
-              `find_items cannot search restaurant catalogs. Call get_menu once per dish; ${input.queries.length} queries were supplied, so no automatic recovery is safe.`,
-              {
-                code: "RESTAURANT_REQUIRES_SINGLE_MENU_QUERY",
-                storeId: input.storeId
-              }
-            ),
-            contracts.itemSearch
-          );
-        }
-        const [query] = input.queries;
         return toolError(
           new DoorDashCliError(
-            `find_items searches grocery and retail catalogs only. This store is a restaurant; call get_menu with store_id ${input.storeId} and query "${query}". Do not retry find_items for this store.`,
+            `find_items searches grocery and retail catalogs only. This store is a restaurant; call get_menu with store_id ${input.storeId}. Do not retry find_items for this store.`,
             {
               code: "RESTAURANT_REQUIRES_MENU",
-              storeId: input.storeId,
-              query
+              storeId: input.storeId
             }
           ),
           contracts.itemSearch
@@ -1607,7 +1511,7 @@ export function createDoorDashApp({
           }
         );
       } catch (error) {
-        if (error?.name === "DoorDashOperationError") {
+        if (error?.name === "DoorDashOperationError" || stoppedBeforeCredentialExecution(error)) {
           throw error;
         }
         throw new DoorDashCliError(
@@ -1616,6 +1520,7 @@ export function createDoorDashApp({
             code: "REORDER_OUTCOME_UNKNOWN",
             storeId,
             stateScope: "carts",
+            requiresCredentialRenewal: error?.details?.requiresCredentialRenewal === true,
             cause: error instanceof Error ? error.message : String(error)
           }
         );
@@ -1665,6 +1570,7 @@ export function createDoorDashApp({
             code: "REORDER_HYDRATION_FAILED",
             cartUuid: reordered.cart_uuid,
             storeId,
+            requiresCredentialRenewal: error?.details?.requiresCredentialRenewal === true,
             cause: error instanceof Error ? error.message : String(error)
           }
         );
@@ -1679,11 +1585,7 @@ export function createDoorDashApp({
   async function getMenu(input) {
     try {
       const rawProjected = await executeCli(menuArgs(input), {
-        project: (data) =>
-          projectWithContract(
-            contracts.menu,
-            filterMenuByQuery(data, input.query)
-          )
+        project: (data) => projectWithContract(contracts.menu, data)
       });
       const projected = sanitizeProjectedMenu(rawProjected, input.storeId);
       rememberProjectedMenuIds(projected);
@@ -1768,7 +1670,7 @@ export function createDoorDashApp({
             })
         });
       } catch (error) {
-        if (error?.name === "DoorDashOperationError") {
+        if (error?.name === "DoorDashOperationError" || stoppedBeforeCredentialExecution(error)) {
           throw error;
         }
         throw new DoorDashCliError(
@@ -1777,6 +1679,7 @@ export function createDoorDashApp({
             code: "CART_MUTATION_OUTCOME_UNKNOWN",
             cartUuid: input.cartUuid,
             stateScope: "cart",
+            requiresCredentialRenewal: error?.details?.requiresCredentialRenewal === true,
             cause: error instanceof Error ? error.message : String(error)
           }
         );
@@ -1796,6 +1699,7 @@ export function createDoorDashApp({
           {
             code: "CART_REMOVAL_HYDRATION_FAILED",
             cartUuid: input.cartUuid,
+            requiresCredentialRenewal: error?.details?.requiresCredentialRenewal === true,
             cause: error instanceof Error ? error.message : String(error)
           }
         );
@@ -1853,7 +1757,8 @@ export function createDoorDashApp({
       if (
         error?.details?.code ===
           "CHECKOUT_STATE_CHANGE_IN_PROGRESS" ||
-        error?.name === "DoorDashOperationError"
+        error?.name === "DoorDashOperationError" ||
+        stoppedBeforeCredentialExecution(error)
       ) {
         return toolError(error, contracts.orderPreview);
       }
@@ -1863,6 +1768,7 @@ export function createDoorDashApp({
           {
             code: "PREVIEW_OUTCOME_UNKNOWN",
             cartUuid: input.cartUuid,
+            requiresCredentialRenewal: error?.details?.requiresCredentialRenewal === true,
             cause: error instanceof Error ? error.message : String(error)
           }
         ),
@@ -1876,14 +1782,13 @@ export function createDoorDashApp({
   async function preflightCartItems(input) {
     const items = [];
     const itemErrors = [];
-    const hasAmbiguousBareSelections = input.items.some(
+    const needsStoreClassification = input.items.some(
       (item) =>
         !item.itemId.startsWith("i_") &&
-        !item.requestedOptions?.length &&
-        item.nestedOptions?.length
+        !item.requestedOptions?.length
     );
     let storeIsRestaurant = false;
-    if (hasAmbiguousBareSelections) {
+    if (needsStoreClassification) {
       try {
         const storeDetails = await executeCli(
           storeDetailsArgs({ storeId: input.storeId }),
@@ -1891,24 +1796,12 @@ export function createDoorDashApp({
         );
         storeIsRestaurant = rawStoreIsRestaurant(storeDetails);
       } catch {
-        // Unknown vertical keeps the existing retail-then-restaurant fallback.
+        // Unknown vertical keeps the retail-then-restaurant fallback.
       }
     }
     const itemIdsNeedingDetails = [
-      ...new Set(
-        input.items
-          .filter(
-            (item) =>
-              item.itemId.startsWith("i_") ||
-              item.requestedOptions?.length ||
-              item.nestedOptions?.length
-          )
-          .map((item) => item.itemId)
-      )
+      ...new Set(input.items.map((item) => item.itemId))
     ];
-    if (itemIdsNeedingDetails.length === 0) {
-      return { items: input.items, itemErrors };
-    }
 
     const loadPreflightDetails = async (itemId, restaurantItem) => {
       const rawDetails = await executeCli(
@@ -2171,12 +2064,14 @@ export function createDoorDashApp({
           project: (data) => data
         });
       } catch (error) {
+        if (stoppedBeforeCredentialExecution(error)) throw error;
         throw new DoorDashCliError(
           "The cart write returned an unknown outcome. Never resend this batch. Inspect the cart once to learn which lines, if any, were added.",
           {
             code: "CART_WRITE_OUTCOME_UNKNOWN",
             cartUuid: addInput.cartUuid,
             storeId: addInput.storeId,
+            requiresCredentialRenewal: error?.details?.requiresCredentialRenewal === true,
             cause: error instanceof Error ? error.message : String(error)
           }
         );
@@ -2208,12 +2103,14 @@ export function createDoorDashApp({
           ...projected,
           checkout_url: checkout.checkout_url
         });
-      } catch {
+      } catch (error) {
         projected = contracts.cart.outputSchema.parse({
           ...projected,
           warnings: [
             ...(projected.warnings || []),
-            "Items were added, but DoorDash did not return a checkout URL. Call create_checkout_link with this cart_uuid."
+            error?.details?.requiresCredentialRenewal
+              ? `Items were added. ${RENEWAL_INSTRUCTIONS} Then call create_checkout_link with this cart_uuid.`
+              : "Items were added, but DoorDash did not return a checkout URL. Call create_checkout_link with this cart_uuid."
           ]
         });
       }
@@ -2230,8 +2127,8 @@ export function createDoorDashApp({
   async function submitOrder(input, authInfo) {
     let stateChangeToken;
     try {
-      assertCurrentPurchaseAccess(securityStore, authInfo);
-      const recordedAttempt = securityStore.getSubmissionAttempt(
+      await assertCurrentPurchaseAccess(securityStore, authInfo);
+      const recordedAttempt = await securityStore.getSubmissionAttempt(
         input.cartUuid
       );
       if (recordedAttempt) {
@@ -2309,9 +2206,9 @@ export function createDoorDashApp({
         validateCardPayment(input, paymentMethods);
       }
 
-      assertCurrentPurchaseAccess(securityStore, authInfo);
-      if (!securityStore.beginSubmission(input.cartUuid)) {
-        const attempt = securityStore.getSubmissionAttempt(input.cartUuid);
+      await assertCurrentPurchaseAccess(securityStore, authInfo);
+      if (!await securityStore.beginSubmission(input.cartUuid)) {
+        const attempt = await securityStore.getSubmissionAttempt(input.cartUuid);
         throw new DoorDashCliError(
           "This cart already has a recorded submission attempt. Refusing to risk a duplicate charge.",
           {
@@ -2330,7 +2227,7 @@ export function createDoorDashApp({
           project: (data) => data
         });
       } catch (error) {
-        securityStore.finishSubmission(input.cartUuid, {
+        await securityStore.finishSubmission(input.cartUuid, {
           status: "unknown",
           errorMessage: error instanceof Error ? error.message : String(error)
         });
@@ -2346,7 +2243,8 @@ export function createDoorDashApp({
             {
               code: upstreamCode,
               cartUuid: input.cartUuid,
-              cause: error instanceof Error ? error.message : String(error)
+              requiresCredentialRenewal: error?.details?.requiresCredentialRenewal === true,
+            cause: error instanceof Error ? error.message : String(error)
             }
           );
         }
@@ -2355,6 +2253,7 @@ export function createDoorDashApp({
           {
             code: "SUBMISSION_OUTCOME_UNKNOWN",
             cartUuid: input.cartUuid,
+            requiresCredentialRenewal: error?.details?.requiresCredentialRenewal === true,
             cause: error instanceof Error ? error.message : String(error)
           }
         );
@@ -2371,7 +2270,7 @@ export function createDoorDashApp({
             ? false
             : undefined;
       if (submittedSuccess === false) {
-        securityStore.finishSubmission(input.cartUuid, {
+        await securityStore.finishSubmission(input.cartUuid, {
           status: "failed",
           orderUuid,
           errorMessage:
@@ -2386,7 +2285,7 @@ export function createDoorDashApp({
         );
       }
       if (submittedSuccess !== true || !orderUuid) {
-        securityStore.finishSubmission(input.cartUuid, {
+        await securityStore.finishSubmission(input.cartUuid, {
           status: "unknown",
           orderUuid,
           errorMessage:
@@ -2401,7 +2300,7 @@ export function createDoorDashApp({
         );
       }
 
-      securityStore.finishSubmission(input.cartUuid, {
+      await securityStore.finishSubmission(input.cartUuid, {
         status: "accepted",
         orderUuid
       });
@@ -2414,12 +2313,15 @@ export function createDoorDashApp({
             const statusResult = await executeCli(
               orderStatusArgs({ orderUuid }),
               {
-                project: (data) => data
+                project: (data) => {
+                  projectWithContract(contracts.orderStatus, data);
+                  return data;
+                }
               }
             );
             finalStatus = statusResult;
             const status = statusValue(statusResult);
-            if (TERMINAL_ORDER_STATUSES.has(status)) {
+            if (classifyOrderStatus(status).terminal) {
               break;
             }
             if (status !== "pending") {
@@ -2439,17 +2341,17 @@ export function createDoorDashApp({
 
       const terminalStatus = statusValue(finalStatus);
       if (terminalStatus) {
-        securityStore.finishSubmission(input.cartUuid, {
+        await securityStore.finishSubmission(input.cartUuid, {
           status: terminalStatus,
           orderUuid
         });
       }
 
-      const warning =
-        statusWarning ||
-        (terminalStatus && terminalStatus !== "successful"
-          ? "The order was submitted but is not confirmed successful. Follow the returned status instructions."
-          : terminalStatus === "successful"
+      const classification = classifyOrderStatus(terminalStatus);
+      const warning = statusWarning ||
+        (classification.failed || terminalStatus === "action_required"
+          ? "The order needs attention or did not complete. Follow the returned status instructions; do not submit it again."
+          : classification.created
             ? null
             : "The order was accepted and is still pending after five status checks. Report it as pending; do not poll again in this request.");
       const projected = projectWithContract(contracts.orderSubmit, {
@@ -2470,6 +2372,34 @@ export function createDoorDashApp({
     }
   }
 
+  async function doordashAuth(input, authInfo) {
+    let stateChangeToken;
+    try {
+      const assertCurrentAccess = async () => {
+        if (!await securityStore.verifyToken(authInfo?.token)) {
+          throw new DoorDashCliError("Unknown or revoked MCP token.", { code: "MCP_ACCESS_REVOKED" });
+        }
+      };
+      await assertCurrentAccess();
+      let result;
+      if (input.access_token !== undefined) {
+        stateChangeToken = acquireCheckoutStateChange({
+          operation: "doordash_auth",
+          stateScope: "account"
+        });
+        result = await credentials.replace(input.access_token, { beforeCommit: assertCurrentAccess });
+        knownMenuIdsByStore.clear();
+      } else {
+        result = await credentials.status();
+      }
+      return toToolResult(projectWithContract(contracts.credentials, result));
+    } catch (error) {
+      return toolError(error, contracts.credentials);
+    } finally {
+      releaseCheckoutStateChange(stateChangeToken);
+    }
+  }
+
   function createDoorDashServer(factoryContext = {}) {
     const authInfo = factoryContext.authInfo;
     const server = new McpServer({
@@ -2479,6 +2409,7 @@ export function createDoorDashApp({
 
     registerDoorDashTools(server, {
       authInfo,
+      doordashAuth: (input) => doordashAuth(input, authInfo),
       addCartItems,
       findItems,
       getItemDetails,
@@ -2509,12 +2440,21 @@ export function createDoorDashApp({
 
   app.use(applySecurityHeaders);
 
-  app.get("/healthz", (_req, res) => {
+  app.get(["/healthz", "/health/live"], (_req, res) => {
     res.json({
       ok: true,
       service: "doordash-cli-mcp",
       version: SERVER_VERSION
     });
+  });
+
+  app.get("/health/ready", async (_req, res) => {
+    try {
+      const healthy = await securityStore.checkHealth();
+      res.status(healthy ? 200 : 503).json({ ok: Boolean(healthy) });
+    } catch {
+      res.status(503).json({ ok: false });
+    }
   });
 
   app.all("/mcp", bearerAuth, (req, res) => {
@@ -2547,7 +2487,8 @@ export function createDoorDashApp({
 
   app.use(adminAuth.requireAdmin);
 
-  app.get("/api/status", (_req, res) => {
+  app.get("/api/status", async (_req, res) => {
+    const counts = await securityStore.getTokenCounts();
     res.json({
       ok: true,
       service: "doordash-cli-mcp",
@@ -2558,18 +2499,18 @@ export function createDoorDashApp({
       activityCount: activityLog.size,
       activityCapacity: 100,
       mcpAuthRequired: true,
-      activeTokenCount: securityStore.activeTokenCount,
-      purchaseTokenCount: securityStore.purchaseTokenCount
+      activeTokenCount: counts.activeTokenCount,
+      purchaseTokenCount: counts.purchaseTokenCount
     });
   });
 
-  app.get("/api/tokens", (_req, res) => {
+  app.get("/api/tokens", async (_req, res) => {
     res.json({
-      tokens: securityStore.listTokens()
+      tokens: await securityStore.listTokens()
     });
   });
 
-  app.post("/api/tokens", requireJson, (req, res) => {
+  app.post("/api/tokens", requireJson, async (req, res) => {
     const parsed = z
       .object({
         name: z.string().min(1).max(80),
@@ -2584,11 +2525,11 @@ export function createDoorDashApp({
       return;
     }
 
-    const token = securityStore.createToken(parsed.data);
+    const token = await securityStore.createToken(parsed.data);
     res.status(201).json(token);
   });
 
-  app.patch("/api/tokens/:id", requireJson, (req, res) => {
+  app.patch("/api/tokens/:id", requireJson, async (req, res) => {
     const parsed = z
       .object({
         allowPurchases: z.boolean()
@@ -2602,7 +2543,7 @@ export function createDoorDashApp({
       return;
     }
 
-    const updated = securityStore.setPurchaseAccess(
+    const updated = await securityStore.setPurchaseAccess(
       req.params.id,
       parsed.data.allowPurchases
     );
@@ -2614,12 +2555,12 @@ export function createDoorDashApp({
     mcpHandler.notify.toolsChanged();
     res.json({
       updated: true,
-      tokens: securityStore.listTokens()
+      tokens: await securityStore.listTokens()
     });
   });
 
-  app.delete("/api/tokens/:id", (req, res) => {
-    const revoked = securityStore.revokeToken(req.params.id);
+  app.delete("/api/tokens/:id", async (req, res) => {
+    const revoked = await securityStore.revokeToken(req.params.id);
     if (!revoked) {
       res.status(404).json({ error: "Token not found." });
       return;
