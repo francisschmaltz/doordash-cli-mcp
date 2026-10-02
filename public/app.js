@@ -11,6 +11,9 @@ const elements = {
   lastRefresh: document.querySelector("#last-refresh"),
   logout: document.querySelector("#logout"),
   mcpEndpoint: document.querySelector("#mcp-endpoint"),
+  preferencesError: document.querySelector("#preferences-error"),
+  preferencesStatus: document.querySelector("#preferences-status"),
+  preferPriority: document.querySelector("#prefer-priority"),
   purchaseStatus: document.querySelector("#purchase-status"),
   refresh: document.querySelector("#refresh"),
   search: document.querySelector("#search"),
@@ -38,8 +41,13 @@ let connectionState = "checking";
 let entries = [];
 let lastCompleteRefreshAt = null;
 let pollTimer = null;
+let preferencesErrorType = null;
+let preferencesLoadState = "loading";
+let preferencesRevision = 0;
+let preferPriority = false;
 let refreshAgain = false;
 let refreshPromise = null;
+let savingPreferences = false;
 let tokenCopyResetTimer = null;
 let tokenLoadState = "loading";
 let tokens = [];
@@ -146,6 +154,34 @@ function setConnectionState(nextState) {
 function setSecurityError(error) {
   elements.securityError.hidden = !error;
   setText(elements.securityError, error ? String(error.message || error) : "");
+}
+
+function setPreferencesError(error, type = null) {
+  preferencesErrorType = error ? type : null;
+  elements.preferencesError.hidden = !error;
+  setText(elements.preferencesError, error ? String(error.message || error) : "");
+}
+
+function renderPreferences() {
+  elements.preferPriority.checked = preferPriority;
+  elements.preferPriority.disabled = savingPreferences || preferencesLoadState !== "loaded";
+  elements.preferPriority.setAttribute("aria-busy", String(savingPreferences));
+  setText(
+    elements.preferencesStatus,
+    savingPreferences
+      ? "Saving…"
+      : preferencesLoadState === "loaded"
+        ? "All MCP clients"
+        : preferencesLoadState === "loading"
+          ? "Loading…"
+          : "Unavailable"
+  );
+}
+
+function applyPreferences(preferences) {
+  preferPriority = preferences.preferPriority;
+  preferencesLoadState = "loaded";
+  renderPreferences();
 }
 
 function activityKey(entry) {
@@ -563,12 +599,14 @@ function applyTokens(tokenResponse) {
 }
 
 async function performRefresh() {
+  const preferencesRevisionAtStart = preferencesRevision;
   const results = await Promise.allSettled([
     fetchJson("/api/status"),
     fetchJson("/activity?limit=100"),
-    fetchJson("/api/tokens")
+    fetchJson("/api/tokens"),
+    fetchJson("/api/preferences")
   ]);
-  const [statusResult, activityResult, tokenResult] = results;
+  const [statusResult, activityResult, tokenResult, preferencesResult] = results;
   const fulfilledCount = results.filter((result) => result.status === "fulfilled").length;
 
   if (statusResult.status === "fulfilled") {
@@ -587,6 +625,26 @@ async function performRefresh() {
   } else if (tokenLoadState === "loading") {
     tokenLoadState = "unavailable";
     renderTokens();
+  }
+
+  if (!savingPreferences && preferencesRevisionAtStart === preferencesRevision) {
+    if (preferencesResult.status === "fulfilled") {
+      applyPreferences(preferencesResult.value);
+      if (preferencesErrorType === "load") {
+        setPreferencesError(null);
+      }
+    } else {
+      if (preferencesLoadState === "loading") {
+        preferencesLoadState = "unavailable";
+        renderPreferences();
+      }
+      if (preferencesErrorType !== "save") {
+        setPreferencesError(
+          new Error(`Order preferences could not be refreshed. ${preferencesResult.reason.message}`),
+          "load"
+        );
+      }
+    }
   }
 
   if (fulfilledCount === results.length) {
@@ -797,6 +855,39 @@ elements.dismissToken.addEventListener("click", () => {
   elements.tokenName.focus({ preventScroll: true });
 });
 
+elements.preferPriority.addEventListener("change", async () => {
+  if (savingPreferences || preferencesLoadState !== "loaded") {
+    renderPreferences();
+    return;
+  }
+
+  const previousValue = preferPriority;
+  preferPriority = elements.preferPriority.checked;
+  savingPreferences = true;
+  preferencesRevision += 1;
+  setPreferencesError(null);
+  renderPreferences();
+
+  try {
+    const preferences = await fetchJson("/api/preferences", {
+      method: "PATCH",
+      body: JSON.stringify({ preferPriority })
+    });
+    applyPreferences(preferences);
+    announceStatus("Order preferences saved.");
+  } catch (error) {
+    preferPriority = previousValue;
+    setPreferencesError(
+      new Error(`The express delivery preference wasn’t saved. ${error.message}`),
+      "save"
+    );
+  } finally {
+    savingPreferences = false;
+    preferencesRevision += 1;
+    renderPreferences();
+  }
+});
+
 elements.refresh.addEventListener("click", () => {
   void runManualRefresh();
 });
@@ -834,5 +925,6 @@ elements.mcpEndpoint.textContent = `${window.location.origin}/mcp`;
 setText(elements.lastRefresh, "Loading…");
 renderEntries();
 renderTokens();
+renderPreferences();
 await requestRefresh();
 scheduleNextPoll();

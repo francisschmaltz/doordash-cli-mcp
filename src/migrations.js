@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 
 import { withTransaction } from "./database.js";
 
-const MIGRATIONS = ["001_security.sql"];
+const MIGRATIONS = ["001_security.sql", "002_order_preferences.sql"];
 
 export async function runMigrations(pool) {
   return withTransaction(pool, async (client) => {

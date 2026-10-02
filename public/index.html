@@ -110,6 +110,25 @@
         </div>
       </section>
 
+      <section class="panel preferences-panel" aria-labelledby="preferences-title">
+        <div class="section-heading">
+          <h2 id="preferences-title">Order preferences</h2>
+          <span id="preferences-status" class="section-note" aria-live="polite">Loading…</span>
+        </div>
+        <div class="preferences-content">
+          <label class="preference-toggle">
+            <input id="prefer-priority" type="checkbox" aria-describedby="priority-help" disabled />
+            <strong>Prefer priority / express delivery</strong>
+          </label>
+          <p id="priority-help">
+            Automatically use express for ASAP delivery when offered. The extra
+            fee stays in the order preview. Pickup and scheduled orders stay
+            standard. Applies to all MCP clients.
+          </p>
+          <p id="preferences-error" class="inline-error" role="alert" hidden></p>
+        </div>
+      </section>
+
       <section class="panel activity-panel" aria-labelledby="activity-title">
         <div class="section-heading">
           <h2 id="activity-title">Command history</h2>
@@ -151,7 +170,7 @@
       </section>
 
       <footer>
-        <span>Tokens persist in SQLite · command history resets on restart</span>
+        <span>Tokens and preferences persist in PostgreSQL · command history resets on restart</span>
         <a href="/activity" target="_blank" rel="noreferrer">View raw JSON</a>
       </footer>
     </main>

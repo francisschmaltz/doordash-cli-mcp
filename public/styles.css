@@ -245,8 +245,40 @@ h2 {
   background: var(--canvas);
 }
 
-.security-panel {
+.security-panel,
+.preferences-panel {
   margin-bottom: 24px;
+}
+
+.preferences-content {
+  padding: 16px 20px;
+}
+
+.preference-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.preference-toggle input {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--primary);
+}
+
+.preferences-content > p:not(.inline-error) {
+  max-width: 700px;
+  margin: 6px 0 0 24px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.preferences-content .inline-error {
+  margin: 12px 0 0;
 }
 
 .section-heading {

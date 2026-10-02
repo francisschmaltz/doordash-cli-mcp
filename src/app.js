@@ -1742,6 +1742,17 @@ export function createDoorDashApp({
   }
 
   async function previewOrder(input, authInfo) {
+    let preferPriority = false;
+    if (input.priority === undefined && !input.scheduledTime && input.fulfillment !== "pickup") {
+      try {
+        preferPriority = (await securityStore.getOrderPreferences()).preferPriority;
+      } catch {
+        return toolError(new DoorDashCliError(
+          "Order preferences are unavailable. No preview was attempted; try again when the database is available.",
+          { code: "ORDER_PREFERENCES_UNAVAILABLE" }
+        ), contracts.orderPreview);
+      }
+    }
     let stateChangeToken;
     try {
       stateChangeToken = acquireCheckoutStateChange({
@@ -1749,9 +1760,46 @@ export function createDoorDashApp({
         cartUuid: input.cartUuid,
         stateScope: "cart"
       });
-      const projected = await executeCli(previewOrderArgs(input), {
-        project: (data) => projectSignedPreview(data, input)
+      const previewInput = { ...input, priority: input.priority === true };
+      let rawPreview;
+      let projected = await executeCli(previewOrderArgs(previewInput), {
+        project: (data) => {
+          rawPreview = data;
+          return projectSignedPreview(data, previewInput);
+        }
       });
+      if (preferPriority && projected.submit_context.fulfillment === "delivery" && !projected.submit_context.scheduled_time) {
+        const offersPriority = (data) => {
+          const options = data?.quote?.delivery_availability?.delivery_options;
+          return Array.isArray(options) && options.some(
+            (option) => option?.delivery_option_type === "PRIORITY"
+          );
+        };
+        let applied = false;
+        if (offersPriority(rawPreview)) {
+          // The first successful preview establishes the mode. Follow-up quotes
+          // omit fulfillment so checking express never repeats a cart mutation.
+          const priorityInput = { ...previewInput, priority: true };
+          projected = await executeCli(previewOrderArgs({ ...priorityInput, fulfillment: undefined }), {
+            project: (data) => {
+              const preview = projectSignedPreview(data, priorityInput);
+              applied = offersPriority(data) && preview.submit_context.fulfillment === "delivery" && !preview.submit_context.scheduled_time;
+              return preview;
+            }
+          });
+          if (!applied) {
+            projected = await executeCli(previewOrderArgs({ ...previewInput, fulfillment: undefined }), {
+              project: (data) => projectSignedPreview(data, previewInput)
+            });
+          }
+        }
+        projected.warnings = [
+          ...(projected.warnings || []),
+          applied
+            ? "Your express delivery preference was applied. The quoted total includes the priority fee."
+            : "Express delivery is unavailable for this order; the preview uses standard delivery."
+        ];
+      }
       return toToolResult(projected);
     } catch (error) {
       if (
@@ -2508,6 +2556,27 @@ export function createDoorDashApp({
     res.json({
       tokens: await securityStore.listTokens()
     });
+  });
+
+  app.get("/api/preferences", async (_req, res) => {
+    try {
+      res.json(await securityStore.getOrderPreferences());
+    } catch {
+      res.status(503).json({ error: "Order preferences are unavailable." });
+    }
+  });
+
+  app.patch("/api/preferences", requireJson, async (req, res) => {
+    const parsed = z.strictObject({ preferPriority: z.boolean() }).safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "preferPriority must be a boolean." });
+      return;
+    }
+    try {
+      res.json(await securityStore.setOrderPreferences(parsed.data));
+    } catch {
+      res.status(503).json({ error: "Order preferences could not be saved." });
+    }
   });
 
   app.post("/api/tokens", requireJson, async (req, res) => {

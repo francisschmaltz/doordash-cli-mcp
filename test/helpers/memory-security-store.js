@@ -5,6 +5,7 @@ export class MemorySecurityStore {
   #tokens = new Map();
   #submissions = new Map();
   #credential;
+  #preferPriority = false;
   #clock;
   #randomBytes;
   #randomUUID;
@@ -105,6 +106,16 @@ export class MemorySecurityStore {
   }
 
   getCredential() { return this.#credential ? { ...this.#credential } : null; }
+
+  getOrderPreferences() { return { preferPriority: this.#preferPriority }; }
+
+  setOrderPreferences({ preferPriority }) {
+    if (typeof preferPriority !== "boolean") {
+      throw new Error("Priority delivery preference must be a boolean.");
+    }
+    this.#preferPriority = preferPriority;
+    return this.getOrderPreferences();
+  }
 
   setCredential({ accessToken, expiresAt = null }) {
     if (typeof accessToken !== "string" || !accessToken.trim()) {

@@ -148,6 +148,18 @@ function personalSubmitArgs(context, paymentConfirmation) {
   };
 }
 
+function expressPreviewResult({ cartUuid, priority = false, available = true, pickup = false }) {
+  const result = previewResult({ cartUuid });
+  result.quote.total_before_tip.unit_amount = priority ? 2700 : 2500;
+  result.quote.store_order_cart.is_consumer_pickup = pickup;
+  result.quote.delivery_availability = {
+    delivery_options: available
+      ? [{ delivery_option_type: "STANDARD" }, { delivery_option_type: "PRIORITY" }]
+      : [{ delivery_option_type: "STANDARD" }]
+  };
+  return result;
+}
+
 function commandCount(calls, first, second) {
   return calls.filter(
     (args) => args[0] === first && args[1] === second
@@ -854,4 +866,116 @@ test("v025 failed status lookup is reported as verification failure, not fabrica
   assert.match(result.result.structuredContent.warnings.join(" "), /status verification failed/);
   assert.doesNotMatch(result.result.structuredContent.warnings.join(" "), /pending after five/);
   assert.equal(store.getSubmissionAttempt("cart-status-failed").status, "accepted");
+});
+
+test("express preference quotes the upgrade and submission preserves it after the preference changes", async (t) => {
+  const store = new SecurityStore();
+  store.setOrderPreferences({ preferPriority: true });
+  const auth = purchaseAuth(store);
+  const calls = [];
+  const { mcpHandler } = createTestApp({
+    securityStore: store,
+    runCli: async (args) => {
+      calls.push(args);
+      if (args[1] === "preview") {
+        return cliResult(expressPreviewResult({
+          cartUuid: "cart-express", priority: args.includes("--priority")
+        }));
+      }
+      if (args[1] === "submit") return cliResult({ success: true, order_uuid: "order-express" });
+      if (args[1] === "status") return cliResult({ order: { status: "successful", order_uuid: "order-express" } });
+      throw new Error(`Unexpected CLI call: ${args.join(" ")}`);
+    }
+  });
+  t.after(() => mcpHandler.close());
+  const preview = await mcpRequest(mcpHandler, auth, "preview_order", {
+    cart_uuid: "cart-express", fulfillment: "delivery"
+  });
+  assert.equal(preview.result.isError, undefined, JSON.stringify(preview));
+  const context = preview.result.structuredContent.submit_context;
+  assert.equal(context.priority, true);
+  assert.equal(context.expected_total_before_tip, 27);
+  assert.match(preview.result.structuredContent.warnings.join(" "), /quoted total includes the priority fee/);
+  assert.equal(calls[0].includes("--priority"), false);
+  assert.equal(calls[1].includes("--priority"), true);
+  assert.equal(calls[1].includes("--fulfillment"), false);
+
+  store.setOrderPreferences({ preferPriority: false });
+  const submitted = await mcpRequest(mcpHandler, auth, "order_submit", personalSubmitArgs(context), 2);
+  assert.equal(submitted.result.isError, undefined, JSON.stringify(submitted));
+  assert.equal(submitted.result.structuredContent.order_uuid, "order-express");
+  assert.equal(calls[2].includes("--priority"), true);
+  assert.equal(calls.find((args) => args[1] === "submit").includes("--priority"), true);
+  const duplicate = await mcpRequest(mcpHandler, auth, "order_submit", personalSubmitArgs(context), 3);
+  assert.equal(duplicate.result.structuredContent.error.code, "SUBMISSION_ALREADY_ATTEMPTED");
+  assert.equal(commandCount(calls, "order", "submit"), 1);
+});
+
+test("express preference skips ineligible orders and respects an explicit standard request", async () => {
+  const cases = [
+    { name: "off", preference: false, expectedCalls: 1 },
+    { name: "unavailable", available: false, expectedCalls: 1 },
+    { name: "standard", input: { priority: false }, expectedCalls: 1 },
+    { name: "pickup", pickup: true, expectedCalls: 1 },
+    { name: "scheduled", input: { scheduled_time: "2026-10-03T19:00:00Z" }, expectedCalls: 1 },
+    { name: "disappeared", disappears: true, expectedCalls: 3 }
+  ];
+  for (const scenario of cases) {
+    const store = new SecurityStore();
+    store.setOrderPreferences({ preferPriority: scenario.preference !== false });
+    const auth = purchaseAuth(store);
+    const calls = [];
+    const { mcpHandler } = createTestApp({
+      securityStore: store,
+      runCli: async (args) => {
+        calls.push(args);
+        return cliResult(expressPreviewResult({
+          cartUuid: scenario.name,
+          priority: args.includes("--priority"),
+          available: scenario.available !== false && !(scenario.disappears && calls.length > 1),
+          pickup: scenario.pickup
+        }));
+      }
+    });
+    try {
+      const preview = await mcpRequest(mcpHandler, auth, "preview_order", {
+        cart_uuid: scenario.name, ...scenario.input
+      });
+      assert.equal(preview.result.isError, undefined, `${scenario.name}: ${JSON.stringify(preview)}`);
+      assert.equal(preview.result.structuredContent.submit_context.priority, false, scenario.name);
+      assert.equal(preview.result.structuredContent.submit_context.expected_total_before_tip, 25, scenario.name);
+      assert.equal(calls.length, scenario.expectedCalls, scenario.name);
+      assert.equal(calls.at(-1).includes("--priority"), false, scenario.name);
+    } finally {
+      await mcpHandler.close();
+    }
+  }
+});
+
+test("express preference does not retry unknown preview outcomes or silently ignore database failures", async () => {
+  for (const databaseFailure of [false, true]) {
+    const store = new SecurityStore();
+    store.setOrderPreferences({ preferPriority: true });
+    if (databaseFailure) store.getOrderPreferences = async () => { throw new Error("database unavailable"); };
+    const auth = purchaseAuth(store);
+    const calls = [];
+    const { mcpHandler } = createTestApp({
+      securityStore: store,
+      runCli: async (args) => {
+        calls.push(args);
+        if (args.includes("--priority")) throw new Error("preview connection interrupted");
+        return cliResult(expressPreviewResult({ cartUuid: "cart-failed-express" }));
+      }
+    });
+    try {
+      const preview = await mcpRequest(mcpHandler, auth, "preview_order", { cart_uuid: "cart-failed-express" });
+      assert.equal(preview.result.isError, true);
+      assert.equal(preview.result.structuredContent.error.code,
+        databaseFailure ? "ORDER_PREFERENCES_UNAVAILABLE" : "PREVIEW_OUTCOME_UNKNOWN");
+      assert.equal(calls.length, databaseFailure ? 0 : 2);
+      assert.equal(store.getSubmissionAttempt("cart-failed-express"), null);
+    } finally {
+      await mcpHandler.close();
+    }
+  }
 });

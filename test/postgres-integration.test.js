@@ -87,11 +87,15 @@ async function sqliteFixture(t, { invalidTimestamp = false } = {}) {
   return { sqlitePath, originalToken, originalHash };
 }
 
-test("PostgreSQL migrations, token persistence, live permissions, and revocation", integrationOptions, async (t) => {
+test("PostgreSQL migrations, token and preference persistence, live permissions, and revocation", integrationOptions, async (t) => {
   const database = await isolatedDatabase(t);
   const first = new SecurityStore({ pool: database.pool });
-  assert.deepEqual(await first.initialize(), ["001_security.sql"]);
+  assert.deepEqual(await first.initialize(), ["001_security.sql", "002_order_preferences.sql"]);
   assert.deepEqual(await runMigrations(database.pool), []);
+  assert.deepEqual(await first.getOrderPreferences(), { preferPriority: false });
+  assert.deepEqual(await first.setOrderPreferences({ preferPriority: true }), { preferPriority: true });
+  await assert.rejects(first.setOrderPreferences({ preferPriority: "true" }), /must be a boolean/);
+  assert.deepEqual(await first.getOrderPreferences(), { preferPriority: true });
   const created = await first.createToken({ name: "Open WebUI", allowPurchases: false });
   const raw = (await database.pool.query("SELECT * FROM mcp_tokens WHERE id = $1", [created.id])).rows[0];
   assert.notEqual(raw.token_hash, created.token);
@@ -102,6 +106,9 @@ test("PostgreSQL migrations, token persistence, live permissions, and revocation
   await database.closePool(database.pool);
   const restarted = new SecurityStore({ pool: database.createPool() });
   await restarted.initialize();
+  assert.deepEqual(await restarted.getOrderPreferences(), { preferPriority: true });
+  assert.deepEqual(await restarted.setOrderPreferences({ preferPriority: false }), { preferPriority: false });
+  assert.deepEqual(await restarted.getOrderPreferences(), { preferPriority: false });
   assert.equal((await restarted.verifyToken(created.token)).id, created.id);
   assert.equal(await restarted.setPurchaseAccess(created.id, true), true);
   assert.deepEqual((await restarted.verifyToken(created.token)).scopes,
@@ -121,7 +128,7 @@ test("PostgreSQL reservation admits exactly one concurrent submission and surviv
   const first = new SecurityStore({ pool: database.pool });
   const second = new SecurityStore({ pool: database.createPool() });
   const migrations = await Promise.all([first.initialize(), second.initialize()]);
-  assert.deepEqual(migrations.flat(), ["001_security.sql"]);
+  assert.deepEqual(migrations.flat(), ["001_security.sql", "002_order_preferences.sql"]);
   const attempts = await Promise.all(Array.from({ length: 20 }, (_, index) =>
     (index % 2 ? first : second).beginSubmission("one-cart")));
   assert.equal(attempts.filter(Boolean).length, 1);
@@ -218,7 +225,7 @@ test("failed PostgreSQL migration rolls back DDL and its version marker", integr
   await assert.rejects(runMigrations(database.pool), (error) => error.code === "42P07");
   assert.equal((await database.pool.query("SELECT to_regclass('schema_migrations') AS table_name")).rows[0].table_name, null);
   await database.pool.query("DROP TABLE mcp_tokens");
-  assert.deepEqual(await runMigrations(database.pool), ["001_security.sql"]);
+  assert.deepEqual(await runMigrations(database.pool), ["001_security.sql", "002_order_preferences.sql"]);
 });
 
 test("PostgreSQL-backed HTTP/MCP renews credentials, preserves state, and reports database readiness", integrationOptions, async (t) => {
@@ -252,6 +259,24 @@ test("PostgreSQL-backed HTTP/MCP renews credentials, preserves state, and report
   });
   assert.equal(creation.status, 201);
   const bearer = await creation.json();
+  assert.equal((await fetch(`${base}/api/preferences`)).status, 401);
+  assert.equal((await fetch(`${base}/api/preferences`, {
+    headers: { Authorization: `Bearer ${bearer.token}` }
+  })).status, 401);
+  assert.deepEqual(await (await fetch(`${base}/api/preferences`, { headers })).json(),
+    { preferPriority: false });
+  const preferences = await fetch(`${base}/api/preferences`, {
+    method: "PATCH", headers, body: JSON.stringify({ preferPriority: true })
+  });
+  assert.equal(preferences.status, 200);
+  assert.deepEqual(await preferences.json(), { preferPriority: true });
+  assert.deepEqual(await (await fetch(`${base}/api/preferences`, { headers })).json(),
+    { preferPriority: true });
+  assert.equal((await fetch(`${base}/api/preferences`, {
+    method: "PATCH", headers, body: JSON.stringify({ preferPriority: "true" })
+  })).status, 400);
+  assert.deepEqual(await (await fetch(`${base}/api/preferences`, { headers })).json(),
+    { preferPriority: true });
   let id = 0;
   const rpc = async (method, params) => {
     const response = await fetch(`${base}/mcp`, {
@@ -273,6 +298,7 @@ test("PostgreSQL-backed HTTP/MCP renews credentials, preserves state, and report
   assert.deepEqual(usedTokens, ["postgres-new-fixture-token", "postgres-new-fixture-token"]);
   assert.equal(JSON.stringify({ renewal, log: activityLog.list() }).includes("postgres-new-fixture-token"), false);
   const restartedStore = new SecurityStore({ pool: database.createPool() });
+  assert.deepEqual(await restartedStore.getOrderPreferences(), { preferPriority: true });
   const restartedCredentials = new DoorDashCredentialManager({ securityStore: restartedStore, runCli });
   await restartedCredentials.initialize("stale\nbootstrap-fixture-token");
   assert.equal((await restartedCredentials.status()).authenticated, true);

@@ -82,6 +82,15 @@ successful web login receives an HttpOnly session cookie. Scripts can instead
 send `Authorization: Bearer <ADMIN_ACCESS_TOKEN>`. The `/mcp` endpoint keeps
 its separate MCP bearer tokens.
 
+In the admin's **Order preferences**, enable **Prefer priority / express
+delivery** once to use express automatically for all MCP clients. The setting
+is saved in PostgreSQL and survives restarts. Eligible ASAP delivery previews
+include the express fee; orders without express, pickup, and scheduled orders
+use standard delivery. Order confirmation is still required. Omit `priority`
+in `preview_order` to follow this preference, or pass `priority: false` for an
+explicit standard-delivery request. Submission always uses the confirmed
+`submit_context.priority`, even if the preference changes afterward.
+
 ## Token permissions
 
 Each token has its own **Checkout & card details** checkbox.

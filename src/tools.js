@@ -285,7 +285,9 @@ const previewOptionsSchema = {
     .describe(
       "Optional. Omit to preserve the cart's current mode; passing delivery or pickup changes it."
     ),
-  priority: z.boolean().default(false),
+  priority: z.boolean().optional().describe(
+    "Omit to use the admin's express delivery preference when available. Set false only when the user asks for standard delivery; set true to request express explicitly. Copy the returned submit_context.priority into order_submit."
+  ),
   include_work_benefits: z
     .boolean()
     .default(true)

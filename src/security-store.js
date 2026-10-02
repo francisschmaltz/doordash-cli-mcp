@@ -181,6 +181,26 @@ export class SecurityStore {
     return credentialRecord(result.rows[0]);
   }
 
+  async getOrderPreferences() {
+    const result = await this.#database.query(`
+      SELECT prefer_priority FROM order_preferences WHERE id = 1
+    `);
+    return { preferPriority: result.rows[0]?.prefer_priority === true };
+  }
+
+  async setOrderPreferences({ preferPriority }) {
+    if (typeof preferPriority !== "boolean") {
+      throw new Error("Priority delivery preference must be a boolean.");
+    }
+    const result = await this.#database.query(`
+      INSERT INTO order_preferences (id, prefer_priority)
+      VALUES (1, $1) ON CONFLICT (id) DO UPDATE
+      SET prefer_priority = EXCLUDED.prefer_priority
+      RETURNING prefer_priority
+    `, [preferPriority]);
+    return { preferPriority: result.rows[0].prefer_priority === true };
+  }
+
   async setCredential(credential) {
     const { accessToken, expiresAt } = validateCredential(credential);
     const result = await this.#database.query(`
