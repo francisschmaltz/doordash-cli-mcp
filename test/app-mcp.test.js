@@ -129,6 +129,14 @@ test("purchase tools appear only for tokens with the checkbox enabled", async ()
     ),
     /Only after list_payment_methods cannot identify the default/
   );
+  const submitSchema = purchaseList.body.result.tools.find(
+    (tool) => tool.name === "order_submit"
+  ).inputSchema;
+  assert.match(submitSchema.properties.payment_confirmation.description, /Required OBJECT/);
+  assert.match(submitSchema.properties.confirmation.description, /after the user approves/);
+  for (const field of ["preview_token", "payment_confirmation", "confirmation", "apply_credits"]) {
+    assert.ok(submitSchema.required.includes(field), `${field} must remain required`);
+  }
   const orderListMax = purchaseList.body.result.tools.find(
     (tool) => tool.name === "list_orders"
   ).inputSchema.properties.max;

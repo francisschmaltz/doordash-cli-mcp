@@ -395,6 +395,12 @@ optional `team_account_id`; use
 required expense code or notes. For a personal card, call
 `list_payment_methods` and copy `brand` and `last4` from the `is_default` card
 after the user confirms it.
+Call `list_payment_methods` before asking for final approval so the user can
+confirm the order, tip, and default card together. `payment_confirmation` is an
+object identifying that payment; `"PLACE ORDER"` belongs in `confirmation`.
+Input validation errors submit nothing and leave the cart's submission record
+untouched. Fix every reported field together before another call; do not repeat
+unchanged arguments.
 Use `account_default` only when that call cannot identify the default, browser
 checkout was offered, and the user explicitly accepts the unseen account
 default.

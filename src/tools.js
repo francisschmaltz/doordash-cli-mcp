@@ -333,7 +333,12 @@ function orderSubmitInputSchema(shape) {
       });
       return z.NEVER;
     }
-    if (paymentValues.length) {
+    if (
+      paymentValues.length &&
+      paymentValues[0][1] !== null &&
+      typeof paymentValues[0][1] === "object" &&
+      !Array.isArray(paymentValues[0][1])
+    ) {
       const payment = { ...paymentValues[0][1] };
       if (payment.type === "work_budget") {
         const names = [
@@ -881,7 +886,7 @@ export function registerDoorDashTools(server, context) {
     {
       title: "Preview DoorDash Order",
       description:
-        "Return authoritative cart contents, pricing, address, ETA, tips, and work budgets. Before order_submit, show the user these values and copy submit_context exactly. Passing fulfillment changes the cart mode.",
+        "Return authoritative cart contents, pricing, address, ETA, tips, and work budgets. Copy ALL submit_context fields into order_submit. For personal payment, call list_payment_methods before asking the user to confirm the order, tip, and default card together. Submission also requires tip_confirmed: true, confirmation: \"PLACE ORDER\", and an object payment_confirmation. Passing fulfillment changes the cart mode.",
       inputSchema: canonicalObject({
           cart_uuid: idSchema.describe("Copy cart_uuid from a cart response."),
           ...previewOptionsSchema
@@ -954,7 +959,7 @@ export function registerDoorDashTools(server, context) {
       {
         title: "List DoorDash Payment Cards",
         description:
-          "List masked saved cards: brand, last four, expiry, and default status. Wallets and full card numbers are not available.",
+          "List masked saved cards. Before order confirmation, show the is_default card to the user. After they accept it, use payment_confirmation: {\"type\":\"card\",\"brand\":<copied brand>,\"last4\":<copied last4>} in order_submit. Never guess the default. Wallets and full card numbers are not available.",
         inputSchema: canonicalObject({}),
         annotations: annotations({ readOnly: true })
       },
@@ -970,11 +975,13 @@ export function registerDoorDashTools(server, context) {
       {
         title: "Submit DoorDash Order",
         description:
-          "Place one confirmed cart. Call preview_order and copy every submit_context field, including preview_token. For a personal card, also call list_payment_methods and copy brand/last4 from the is_default card after user confirmation. expected_total_before_tip and tip are dollars. Never call this twice for one cart.",
+          "Place one confirmed cart. Copy ALL preview_order submit_context fields, including preview_token and apply_credits, then add tip in dollars, tip_confirmed: true, confirmation: \"PLACE ORDER\", and payment_confirmation as an OBJECT, never a string. For personal payment, call list_payment_methods and get user confirmation of the is_default card; use {type: \"card\", brand, last4} with copied values. For work payment use {type: \"work_budget\", name} with the confirmed budget name. Validation failure submits nothing: fix ALL reported fields before another call; never repeat unchanged arguments. Never resubmit after a recorded submission attempt.",
         inputSchema: orderSubmitInputSchema({
           cart_uuid: idSchema.describe("Copy cart_uuid from preview_order."),
           preview_token: z
-            .string()
+            .string({
+              error: "preview_token is required. Copy it exactly from preview_order submit_context, together with ALL other submit_context fields. No order was submitted; do not retry unchanged arguments."
+            })
             .regex(
               /^[A-Za-z0-9_-]{43}\.[A-Za-z0-9_-]{43}$/,
               "Copy preview_token exactly from preview_order submit_context."
@@ -1002,7 +1009,9 @@ export function registerDoorDashTools(server, context) {
             .describe(
               "Confirmed tip in dollars. Copy a tip_suggestions[].amount or use the user's explicit amount."
             ),
-          tip_confirmed: z.literal(true),
+          tip_confirmed: z.literal(true, {
+            error: "tip_confirmed must be true only after the user confirms the tip amount, including zero."
+          }).describe("Set true after the user confirms the tip amount, including zero."),
           payment_confirmation: z.union([
             z.strictObject({
               type: z.literal("card"),
@@ -1016,8 +1025,14 @@ export function registerDoorDashTools(server, context) {
               "Only after list_payment_methods cannot identify the default, browser checkout was offered, and the user explicitly accepts that unseen default."
             ),
             workBudgetConfirmationSchema
-          ]),
-          confirmation: z.literal("PLACE ORDER"),
+          ], {
+            error: "payment_confirmation must be an OBJECT: {type: \"card\", brand, last4} copied from list_payment_methods after the user confirms the default card; or {type: \"work_budget\", name} for the confirmed work budget. Use {type: \"account_default\", acknowledgement: \"USE ACCOUNT DEFAULT\"} only after the default cannot be identified, browser checkout was offered, and the user explicitly accepts the unseen default. \"PLACE ORDER\" belongs only in confirmation. No order was submitted; fix all reported fields and do not retry unchanged arguments."
+          }).describe(
+            "Required OBJECT identifying the user's confirmed payment, never the string PLACE ORDER. Card: {type: \"card\", brand, last4} from list_payment_methods is_default card. Work: {type: \"work_budget\", name} from the selected eligible budget."
+          ),
+          confirmation: z.literal("PLACE ORDER", {
+            error: "confirmation is required and must equal \"PLACE ORDER\" after the user approves the order. No order was submitted; do not retry unchanged arguments."
+          }).describe("Set to PLACE ORDER only after the user approves this preview and payment."),
           scheduled_time: z
             .string()
             .datetime({ offset: true })
@@ -1027,13 +1042,13 @@ export function registerDoorDashTools(server, context) {
             "Copy submit_context.fulfillment."
           ),
           priority: z
-            .boolean()
+            .boolean({ error: "priority is required. Copy submit_context.priority exactly; do not guess." })
             .describe("Copy submit_context.priority."),
           apply_credits: z
-            .boolean()
+            .boolean({ error: "apply_credits is required. Copy submit_context.apply_credits exactly; do not guess. No order was submitted; do not retry unchanged arguments." })
             .describe("Copy submit_context.apply_credits."),
           pin_handoff_required: z
-            .boolean()
+            .boolean({ error: "pin_handoff_required is required. Copy submit_context.pin_handoff_required exactly; do not guess." })
             .describe("Copy submit_context.pin_handoff_required."),
           pin_handoff_acknowledged: z
             .literal(true)

@@ -4179,7 +4179,13 @@ export function summarizeResponse(value) {
       return `${plural(value.orders.length, "DoorDash order")} in history.`;
     case "order_preview": {
       const total = dollarText(value.pricing?.total_before_tip);
-      return `DoorDash order preview${value.store?.name ? ` from ${value.store.name}` : ""}: ${plural(value.items.length, "item")}${total ? `, ${total} before tip` : ""}${value.delivery_time ? `, ${value.delivery_time}` : ""}.`;
+      const payment = value.submit_context.budget_id
+        ? "Use payment_confirmation: {type: \"work_budget\", name} with the confirmed selected budget's name; copy work_benefits.team_id and the selected budget's team_account_id when present, and ask for any required expense details."
+        : "Before asking for final approval, call list_payment_methods with {} and show the default card alongside this order and tip. After the user accepts it, use payment_confirmation: {type: \"card\", brand, last4} with that card's copied values.";
+      const pin = value.submit_context.pin_handoff_required
+        ? " Ask the user to accept handing the PIN to the Dasher, then add pin_handoff_acknowledged: true."
+        : "";
+      return `DoorDash order preview${value.store?.name ? ` from ${value.store.name}` : ""}: ${plural(value.items.length, "item")}${total ? `, ${total} before tip` : ""}${value.delivery_time ? `, ${value.delivery_time}` : ""}. To submit, copy ALL submit_context fields unchanged, including preview_token and apply_credits. Add the user's tip in dollars, tip_confirmed: true, confirmation: \"PLACE ORDER\", and payment_confirmation as an OBJECT, never a string. ${payment}${pin} Do not submit until the user confirms the order, tip, and payment; do not repeat unchanged failed calls.`;
     }
     case "receipt": {
       const total = dollarText(value.pricing?.total);
@@ -4203,8 +4209,15 @@ export function summarizeResponse(value) {
     }
     case "address_list":
       return `${plural(value.addresses.length, "saved DoorDash address", "saved DoorDash addresses")}.`;
-    case "payment_methods":
-      return `${plural(value.cards.length, "masked DoorDash card")}.`;
+    case "payment_methods": {
+      const defaults = value.cards.filter((card) => card.is_default === true);
+      if (defaults.length !== 1) {
+        return `${plural(value.cards.length, "masked DoorDash card")}. No unique default card was identified. Offer create_checkout_link; use account_default only if the user explicitly accepts the unseen account default after that offer.`;
+      }
+      const { brand, last4 } = defaults[0];
+      const payment = JSON.stringify({ type: "card", brand, last4 });
+      return `${plural(value.cards.length, "masked DoorDash card")}. Default: ${brand} ending in ${last4}. Show this card with the order and tip for user approval; afterward copy payment_confirmation: ${payment} into order_submit. Copy ALL preview submit_context fields and add the confirmed tip, tip_confirmed: true, and confirmation: \"PLACE ORDER\".`;
+    }
     default:
       return "DoorDash request completed.";
   }

@@ -166,6 +166,91 @@ function commandCount(calls, first, second) {
   ).length;
 }
 
+test("Open WebUI checkout errors explain every missing field before one corrected submission", async (t) => {
+  const store = new SecurityStore({ databasePath: ":memory:" });
+  const auth = purchaseAuth(store);
+  const calls = [];
+  const cartUuid = "cart-webui-validation";
+  const { mcpHandler } = createTestApp({
+    securityStore: store,
+    runCli: async (args) => {
+      calls.push(args);
+      if (args[0] === "order" && args[1] === "preview") {
+        return cliResult(previewResult({ cartUuid }));
+      }
+      if (args[0] === "payment-method") {
+        return cliResult({
+          default_payment_method_id: "card-default",
+          cards: [{ payment_method_id: "card-default", brand: "Visa", last4: "4242" }]
+        });
+      }
+      if (args[0] === "order" && args[1] === "submit") {
+        return cliResult({ success: true, order_uuid: "order-webui-validation" });
+      }
+      if (args[0] === "order" && args[1] === "status") {
+        return cliResult({ order: { order_uuid: "order-webui-validation", status: "successful" } });
+      }
+      throw new Error(`Unexpected CLI call: ${args.join(" ")}`);
+    }
+  });
+  t.after(async () => {
+    await mcpHandler.close();
+    store.close();
+  });
+
+  const preview = await mcpRequest(mcpHandler, auth, "preview_order", { cart_uuid: cartUuid });
+  const context = preview.result.structuredContent.submit_context;
+  assert.match(preview.result.content[0].text, /copy ALL submit_context fields unchanged, including preview_token and apply_credits/);
+  assert.match(preview.result.content[0].text, /Before asking for final approval, call list_payment_methods/);
+  assert.match(preview.result.content[0].text, /confirmation: "PLACE ORDER"/);
+  assert.match(preview.result.content[0].text, /payment_confirmation as an OBJECT, never a string/);
+
+  const complete = personalSubmitArgs(context, { type: "card", brand: "Visa", last4: "4242" });
+  complete.tip = 6;
+  const {
+    payment_confirmation: _payment,
+    confirmation: _confirmation,
+    apply_credits: _credits,
+    ...firstAttempt
+  } = complete;
+  const { preview_token: _previewToken, ...withoutToken } = complete;
+  const attempts = [
+    { args: firstAttempt, messages: [/payment_confirmation must be an OBJECT/, /confirmation is required/, /apply_credits is required/] },
+    { args: { ...withoutToken, payment_confirmation: "PLACE ORDER" }, messages: [/preview_token is required/, /payment_confirmation must be an OBJECT/] },
+    { args: { ...complete, payment_confirmation: "PLACE ORDER" }, messages: [/"PLACE ORDER" belongs only in confirmation/] },
+    { args: { ...complete, payment_confirmation: { type: "card", brand: "Visa" } }, messages: [/last4/, /list_payment_methods/] }
+  ];
+  const callsBeforeInvalid = calls.length;
+  let id = 2;
+  for (const attempt of attempts) {
+    const rejected = await mcpRequest(mcpHandler, auth, "order_submit", attempt.args, id++);
+    assert.equal(rejected.result.isError, true);
+    const message = rejected.result.content.map((entry) => entry.text).join("\n");
+    for (const expected of attempt.messages) {
+      assert.match(message, expected);
+    }
+    assert.match(message, /No order was submitted/);
+    assert.match(message, /do not retry unchanged arguments/);
+    assert.equal(calls.length, callsBeforeInvalid);
+    assert.equal(store.getSubmissionAttempt(cartUuid), null);
+  }
+
+  const payment = await mcpRequest(mcpHandler, auth, "list_payment_methods", {}, id++);
+  assert.match(payment.result.content[0].text, /Default: Visa ending in 4242/);
+  assert.match(payment.result.content[0].text, /payment_confirmation: \{"type":"card","brand":"Visa","last4":"4242"\}/);
+
+  const submitted = await mcpRequest(mcpHandler, auth, "order_submit", complete, id++);
+  assert.equal(submitted.result.isError, undefined);
+  assert.equal(submitted.result.structuredContent.order_uuid, "order-webui-validation");
+  assert.equal(commandCount(calls, "order", "submit"), 1);
+  const submit = calls.find((args) => args[0] === "order" && args[1] === "submit");
+  assert.equal(submit[submit.indexOf("--tip-cents") + 1], "600");
+
+  const repeated = await mcpRequest(mcpHandler, auth, "order_submit", complete, id++);
+  assert.equal(repeated.result.structuredContent.error.code, "SUBMISSION_ALREADY_ATTEMPTED");
+  assert.equal(commandCount(calls, "order", "submit"), 1);
+});
+
 test("empty submit outcome is unknown and its ledger entry blocks every repeat", async (t) => {
   const store = new SecurityStore({ databasePath: ":memory:" });
   const auth = purchaseAuth(store);

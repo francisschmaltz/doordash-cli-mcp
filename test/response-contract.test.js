@@ -253,6 +253,33 @@ test("recovery instructions contain executable tool arguments", () => {
   );
 });
 
+test("checkout summaries preserve work payment and PIN requirements without guessing a default card", () => {
+  const preview = projectWithContract(contracts.orderPreview, fixtures.get(contracts.orderPreview));
+  preview.submit_context.budget_id = "budget-work";
+  preview.submit_context.pin_handoff_required = true;
+  const summary = toToolResult(preview).content[0].text;
+  assert.match(summary, /payment_confirmation: \{type: "work_budget", name\}/);
+  assert.match(summary, /copy work_benefits.team_id/);
+  assert.match(summary, /pin_handoff_acknowledged: true/);
+  assert.doesNotMatch(summary, /call list_payment_methods/);
+
+  for (const cards of [
+    [],
+    [{ brand: "Visa", last4: "4242", is_default: false }],
+    [
+      { brand: "Visa", last4: "4242", is_default: true },
+      { brand: "Mastercard", last4: "5678", is_default: true }
+    ]
+  ]) {
+    const payments = projectWithContract(contracts.paymentMethods, { cards });
+    const message = toToolResult(payments).content[0].text;
+    assert.match(message, /No unique default card was identified/);
+    assert.match(message, /Offer create_checkout_link/);
+    assert.match(message, /only if the user explicitly accepts the unseen account default/);
+    assert.doesNotMatch(message, /payment_confirmation: \{"type":"card"/);
+  }
+});
+
 test("documented JSON responses parse and match their advertised contracts", async () => {
   const markdown = await readFile(
     new URL("../docs/mcp-response-examples.md", import.meta.url),

@@ -524,6 +524,13 @@ selected work budget's identity, rules, and remaining balance; changing any of
 that requires a new preview. Tip, payment confirmation, and expense details are
 added afterward.
 
+The readable preview also explains the complete submit arguments. For personal
+payment, call `list_payment_methods` before asking for final approval; its
+readable result provides the default card's exact `payment_confirmation` object
+to use after user confirmation. Input validation errors explain missing fields
+and incorrect payment shapes before any purchase command or submission record.
+Fix all reported fields together; do not retry unchanged arguments.
+
 Omit the `preview_order` input `fulfillment` to preserve the cart's current
 mode. Passing `delivery` or `pickup` explicitly changes it.
 
@@ -532,7 +539,7 @@ mode. Passing `delivery` or `pickup` explicitly changes it.
   "content": [
     {
       "type": "text",
-      "text": "DoorDash order preview from Example Pizza: 1 item, $25.01 before tip, 20-30 min."
+      "text": "DoorDash order preview from Example Pizza: 1 item, $25.01 before tip, 20-30 min. To submit, copy ALL submit_context fields unchanged, including preview_token and apply_credits. Add the user's tip in dollars, tip_confirmed: true, confirmation: \"PLACE ORDER\", and payment_confirmation as an OBJECT, never a string. Before asking for final approval, call list_payment_methods with {} and show the default card alongside this order and tip. After the user accepts it, use payment_confirmation: {type: \"card\", brand, last4} with that card's copied values. Do not submit until the user confirms the order, tip, and payment; do not repeat unchanged failed calls."
     },
     {
       "type": "text",
